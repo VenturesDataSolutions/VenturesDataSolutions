@@ -24,7 +24,11 @@ function parseCounties(text) {
   const lines = text.trim().split('\n').slice(1); // drop header row
   const counties = [];
   for (const line of lines) {
-    const [state, stateAnsi, countyAnsi, countyName] = line.split(',');
+    const parts = line.split(',');
+    if (parts.length !== 5) {
+      throw new Error(`Unexpected row shape (expected 5 comma-separated fields, got ${parts.length}): ${line}`);
+    }
+    const [state, stateAnsi, countyAnsi, countyName] = parts;
     if (TERRITORY_CODES.has(state)) continue;
     counties.push({
       id: `${stateAnsi}${countyAnsi}`,
