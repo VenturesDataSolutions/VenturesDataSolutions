@@ -31,6 +31,18 @@ async function main() {
   assert((await verifyStripeSignature(payload, '', secret)) === false, 'a missing signature header must fail');
   assert((await verifyStripeSignature(payload, 'garbage', secret)) === false, 'a malformed signature header must fail');
 
+  // Stripe sends multiple v1 signatures during webhook secret rotation; any one matching is enough.
+  const correctV1 = crypto.createHmac('sha256', secret).update(`${now}.${payload}`).digest('hex');
+  const wrongV1 = crypto.createHmac('sha256', 'whsec_wrong').update(`${now}.${payload}`).digest('hex');
+  assert((await verifyStripeSignature(payload, `t=${now},v1=${wrongV1},v1=${correctV1}`, secret)) === true, 'a header with multiple v1 signatures should verify if any one of them matches');
+  assert((await verifyStripeSignature(payload, `t=${now},v1=${wrongV1}`, secret)) === false, 'a header whose only v1 signature is wrong must still fail');
+
+  // A non-numeric but correctly-signed timestamp should fail closed via the Number.isNaN(age)
+  // branch specifically (not the signature check), and must not throw.
+  const nonNumericTimestamp = 'not-a-number';
+  const nonNumericSig = crypto.createHmac('sha256', secret).update(`${nonNumericTimestamp}.${payload}`).digest('hex');
+  assert((await verifyStripeSignature(payload, `t=${nonNumericTimestamp},v1=${nonNumericSig}`, secret)) === false, 'a non-numeric timestamp must fail verification without throwing');
+
   console.log('PASS: webhook.test.js');
 }
 

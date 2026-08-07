@@ -27,17 +27,20 @@ function timingSafeEqual(a, b) {
 export async function verifyStripeSignature(payload, sigHeader, secret, toleranceSeconds = 300) {
   if (!sigHeader) return false;
 
-  const parts = {};
+  let timestamp;
+  const v1Signatures = [];
   for (const part of sigHeader.split(',')) {
     const [key, value] = part.split('=');
-    parts[key] = value;
+    if (key === 't') timestamp = value;
+    if (key === 'v1' && value) v1Signatures.push(value);
   }
-  const timestamp = parts.t;
-  const v1 = parts.v1;
-  if (!timestamp || !v1) return false;
+  if (!timestamp || v1Signatures.length === 0) return false;
 
+  // Stripe sends multiple v1 signatures during webhook secret rotation;
+  // any one of them matching is sufficient.
   const expected = await computeSignature(secret, timestamp, payload);
-  if (!timingSafeEqual(expected, v1)) return false;
+  const matches = v1Signatures.some((v1) => timingSafeEqual(expected, v1));
+  if (!matches) return false;
 
   const age = Math.floor(Date.now() / 1000) - Number(timestamp);
   if (Number.isNaN(age) || age > toleranceSeconds) return false;
