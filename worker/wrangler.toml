@@ -1,0 +1,16 @@
+name = "vds-worker"
+main = "src/index.js"
+compatibility_date = "2026-08-07"
+
+[[kv_namespaces]]
+binding = "COUNTY_LOCKS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+SITE_ORIGIN = "https://venturesdatasolutions.com"
+PRICE_RECURRING_ID = "price_REPLACE_WITH_RECURRING_PRICE_ID"
+PRICE_ONETIME_ID = "price_REPLACE_WITH_ONETIME_PRICE_ID"
+
+[[routes]]
+pattern = "api.venturesdatasolutions.com/*"
+custom_domain = true
