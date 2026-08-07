@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Facebook Ad Creative</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;0,9..144,700;0,9..144,900;1,9..144,600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --cream: #F5F0E1;
+    --forest: #2E4736;
+    --stamp-red: #A8382C;
+    --gold: #C6A24B;
+    --ink: #1C2620;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0;
+    background:#0f1512;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    min-height:100vh;
+    padding: 24px;
+    font-family:'IBM Plex Mono', monospace;
+  }
+
+  /* 1080x1350 (4:5) scaled down for viewing */
+  .ad{
+    width: 432px;
+    height: 540px;
+    background: var(--forest);
+    position: relative;
+    overflow: hidden;
+    display:flex;
+    flex-direction:column;
+    box-shadow: 0 30px 60px -20px rgba(0,0,0,0.6);
+    background-image:
+      radial-gradient(circle at 100% 0%, rgba(198,162,75,0.15), transparent 55%),
+      radial-gradient(circle at 0% 100%, rgba(0,0,0,0.25), transparent 50%);
+  }
+
+  .eyebrow{
+    color: var(--gold);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 28px 28px 0;
+  }
+
+  .headline{
+    font-family:'Fraunces', serif;
+    font-weight: 800;
+    color: var(--cream);
+    font-size: 48px;
+    line-height: 1.02;
+    padding: 14px 28px 0;
+    letter-spacing: -0.01em;
+  }
+  .headline .accent{
+    color: var(--stamp-red);
+    -webkit-text-stroke: 0px;
+  }
+
+  .sub{
+    color: rgba(245,240,225,0.82);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13.5px;
+    line-height: 1.55;
+    padding: 14px 28px 0;
+    max-width: 340px;
+  }
+
+  .price-row{
+    display:flex;
+    align-items:baseline;
+    gap: 10px;
+    padding: 12px 28px 0;
+  }
+  .badge-50{
+    background: var(--stamp-red);
+    color: var(--cream);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 8px;
+    align-self:center;
+  }
+  .price-old{
+    font-size: 16px;
+    color: rgba(245,240,225,0.5);
+    text-decoration: line-through;
+    text-decoration-color: var(--stamp-red);
+    text-decoration-thickness: 2px;
+  }
+  .price-new{
+    font-family:'Fraunces', serif;
+    font-weight: 800;
+    font-size: 26px;
+    color: var(--gold);
+    line-height: 1;
+  }
+  .price-unit{
+    font-family:'IBM Plex Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(245,240,225,0.6);
+    margin-left: 2px;
+  }
+
+  .stamp{
+    position:absolute;
+    top: 26px;
+    right: 26px;
+    width: 96px;
+    height: 96px;
+    border: 3px solid var(--stamp-red);
+    border-radius: 50%;
+    color: var(--stamp-red);
+    background: rgba(245,240,225,0.92);
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    transform: rotate(10deg);
+    font-family:'IBM Plex Mono', monospace;
+    text-transform: uppercase;
+  }
+  .stamp-top{ font-size: 8.5px; font-weight:600; letter-spacing:0.08em; }
+  .stamp-date{ font-size: 12px; font-weight: 700; margin-top:2px; }
+  .stamp-bottom{ font-size: 7px; letter-spacing:0.1em; margin-top:2px; opacity:0.85;}
+
+  .spacer{ flex:1; }
+
+  .strip{
+    background: rgba(0,0,0,0.22);
+    border-top: 1px solid rgba(198,162,75,0.35);
+    padding: 20px 28px 26px;
+  }
+  .strip-line{
+    color: var(--gold);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    margin-bottom: 12px;
+  }
+  .cta{
+    display:inline-flex;
+    align-items:center;
+    gap:10px;
+    background: var(--stamp-red);
+    color: var(--cream);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 13px 20px;
+  }
+  .cta::after{ content: "→"; }
+
+  .dims{
+    margin-top: 18px;
+    color: rgba(245,240,225,0.4);
+    font-size: 11px;
+    text-align:center;
+  }
+</style>
+</head>
+<body>
+<div>
+  <div class="ad">
+    <div class="stamp">
+      <div class="stamp-top">Pulled</div>
+      <div class="stamp-date">Daily</div>
+      <div class="stamp-bottom">Fresh Today</div>
+    </div>
+    <div class="eyebrow">VDS &mdash; Tax &amp; Probate Data</div>
+    <div class="headline">Any county.<br>Any list.<br><span class="accent">24 hrs.</span></div>
+    <div class="price-row">
+      <div class="badge-50">1 Buyer / County</div>
+      <div class="price-new">$150<span class="price-unit">/mo</span></div>
+    </div>
+    <div class="sub">Your county, exclusively. We never sell it to anyone else while you&rsquo;re subscribed &mdash; cancel anytime, no fees.</div>
+    <div class="spacer"></div>
+    <div class="strip">
+      <div class="strip-line">Founding rate &mdash; rises once we're full.</div>
+      <div class="cta">Claim Your County</div>
+    </div>
+  </div>
+  <div class="dims">Mockup shown at 432×540 — export/screenshot at 1080×1350 for Facebook (4:5 feed ratio)</div>
+</div>
+
+</body>
+</html>
