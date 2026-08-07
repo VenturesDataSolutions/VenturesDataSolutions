@@ -44,6 +44,10 @@ export async function handleWebhook({ kv, payload, sigHeader, webhookSecret }) {
     return { status: 400, body: { error: 'invalid JSON payload' } };
   }
 
+  if (!event || !event.data || !event.data.object) {
+    return { status: 400, body: { error: 'malformed event payload' } };
+  }
+
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const countyId = session.metadata && session.metadata.countyId;
@@ -53,6 +57,10 @@ export async function handleWebhook({ kv, payload, sigHeader, webhookSecret }) {
         subscriptionId: session.subscription,
         claimedAt: new Date().toISOString(),
       });
+    } else {
+      // A completed, paid checkout with no countyId means the county never gets locked —
+      // surface this loudly rather than silently dropping it (visible in wrangler tail / Cloudflare logs).
+      console.error('checkout.session.completed missing metadata.countyId', { sessionId: session.id });
     }
     return { status: 200, body: { received: true } };
   }
@@ -62,6 +70,8 @@ export async function handleWebhook({ kv, payload, sigHeader, webhookSecret }) {
     const countyId = subscription.metadata && subscription.metadata.countyId;
     if (countyId) {
       await clearCountyLock(kv, countyId);
+    } else {
+      console.error('customer.subscription.deleted missing metadata.countyId', { subscriptionId: subscription.id });
     }
     return { status: 200, body: { received: true } };
   }
@@ -78,7 +88,10 @@ export async function handlePortalLink({ sessionId, secretKey, returnUrl, fetchI
   try {
     session = await retrieveCheckoutSession({ secretKey, sessionId, fetchImpl });
   } catch (err) {
-    return { status: 404, body: { error: 'checkout session not found' } };
+    if (err.stripeStatus === 404) {
+      return { status: 404, body: { error: 'checkout session not found' } };
+    }
+    return { status: 502, body: { error: err.message } };
   }
   if (!session.customer) {
     return { status: 400, body: { error: 'checkout session has no associated customer' } };

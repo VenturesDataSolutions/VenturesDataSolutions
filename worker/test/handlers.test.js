@@ -76,6 +76,11 @@ async function main() {
   result = await handleWebhook({ kv: webhookKv, payload: otherPayload, sigHeader: sign(otherPayload, Math.floor(Date.now() / 1000)), webhookSecret: secret });
   assert(result.status === 200, 'an unhandled but validly-signed event type should still 200 (so Stripe does not retry it)');
 
+  // webhook: a validly-signed but malformed payload (missing data.object) must fail gracefully, not throw
+  const malformedPayload = JSON.stringify({ type: 'checkout.session.completed' });
+  result = await handleWebhook({ kv: webhookKv, payload: malformedPayload, sigHeader: sign(malformedPayload, Math.floor(Date.now() / 1000)), webhookSecret: secret });
+  assert(result.status === 400, 'a validly-signed event missing data.object should return 400, not throw');
+
   // portal-link: missing session id
   result = await handlePortalLink({ sessionId: null, secretKey: 'sk', returnUrl: 'https://x/r', fetchImpl: fakeFetch({}) });
   assert(result.status === 400, 'portal-link should require a session_id');
@@ -97,6 +102,14 @@ async function main() {
   const noCustomerFetch = async () => ({ ok: true, status: 200, json: async () => ({ id: 'cs_2', customer: null }) });
   result = await handlePortalLink({ sessionId: 'cs_2', secretKey: 'sk', returnUrl: 'https://x/r', fetchImpl: noCustomerFetch });
   assert(result.status === 400, 'portal-link should reject a session with no associated customer');
+
+  // portal-link: Stripe genuinely has no such session (404) should surface as 404
+  result = await handlePortalLink({ sessionId: 'cs_missing', secretKey: 'sk', returnUrl: 'https://x/r', fetchImpl: fakeFetch({ error: { message: 'No such checkout session' } }, 404) });
+  assert(result.status === 404, 'a real Stripe 404 on session lookup should surface as 404');
+
+  // portal-link: any other Stripe failure (e.g. an outage) must not be conflated with "not found"
+  result = await handlePortalLink({ sessionId: 'cs_3', secretKey: 'sk', returnUrl: 'https://x/r', fetchImpl: fakeFetch({ error: { message: 'Internal Stripe error' } }, 500) });
+  assert(result.status === 502 && result.body.error === 'Internal Stripe error', 'a non-404 Stripe failure on session lookup should surface as 502, not be misreported as 404');
 
   console.log('PASS: handlers.test.js');
 }
