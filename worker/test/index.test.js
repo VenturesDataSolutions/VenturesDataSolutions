@@ -90,8 +90,18 @@ async function main() {
   });
   response = await workerModule.fetch(request, baseEnv(webhookKv));
   assert(response.status === 200, 'a validly signed webhook should return 200');
+  assert(!response.headers.get('Access-Control-Allow-Origin'), 'a request with no Origin header (e.g. Stripe\'s server-to-server webhook POST) should not receive a CORS allow header');
   const lock = await webhookKv.get('01001', { type: 'json' });
   assert(lock && lock.customerId === 'cus_1', 'the webhook route should write the county lock');
+
+  // POST /checkout with a malformed JSON body should 400, not throw
+  request = new Request('https://api.venturesdatasolutions.com/checkout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: 'https://venturesdatasolutions.com' },
+    body: 'not valid json',
+  });
+  response = await workerModule.fetch(request, baseEnv(createFakeKV()));
+  assert(response.status === 400, 'a malformed JSON body on /checkout should return 400');
 
   console.log('PASS: index.test.js');
 }
