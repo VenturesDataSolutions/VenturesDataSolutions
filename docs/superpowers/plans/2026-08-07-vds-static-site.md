@@ -949,7 +949,7 @@ const questions = [
   'What happens if I cancel',
   'Can someone else buy my county',
   'How fresh is',
-  "What's included in a pull",
+  'included in a pull',
   'Is there a contract',
 ];
 for (const q of questions) {
