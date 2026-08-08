@@ -19,7 +19,8 @@ assert(cname === 'venturesdatasolutions.com', `CNAME should be venturesdatasolut
 
 const workerReadme = fs.readFileSync(path.join(root, 'worker', 'README.md'), 'utf8');
 assert(workerReadme.includes('wrangler'), 'worker/README.md should mention wrangler');
-assert(/not yet implemented|not built yet/i.test(workerReadme), 'worker/README.md should mark itself as not yet implemented');
+assert(workerReadme.includes('wrangler deploy'), 'worker/README.md should document how to deploy the now-implemented Worker');
+assert(!/not yet implemented|not built yet/i.test(workerReadme), 'worker/README.md should no longer mark itself as not yet implemented, now that the Worker backend is built');
 
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 assert(readme.includes('worker/'), 'README.md should reference the worker/ folder');
