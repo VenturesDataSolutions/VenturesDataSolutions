@@ -181,3 +181,31 @@ a { color: inherit; }
 @media (max-width: 640px) {
   .footer-legal { margin-left: 0; }
 }
+
+/* County picker (Purchase page) */
+.county-input {
+  width: 100%;
+  font-family: 'Inter', sans-serif;
+  font-size: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--cream);
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+.county-status {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px;
+  min-height: 1.2em;
+  margin: 0 0 16px;
+}
+.county-status-available { color: var(--forest); }
+.county-status-unavailable { color: var(--stamp-red); }
+.purchase-error {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px;
+  color: var(--stamp-red);
+  min-height: 1.2em;
+  margin: 12px 0 0;
+}

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claim your county — Venture$ Data Solutions</title>
-<meta name="description" content="Claim exclusive access to your county's tax delinquency and probate data for $150/mo. Online checkout is launching shortly.">
+<meta name="description" content="Claim exclusive access to your county's tax delinquency and probate data for $150/mo.">
 <link rel="icon" type="image/png" href="assets/vds-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -35,8 +35,17 @@
         <span class="badge">Founding rate</span>
         <p class="amount">$150<span class="unit">/mo</span></p>
       </div>
-      <button type="button" class="btn btn-primary" aria-disabled="true" disabled>Claim your county &mdash; coming soon</button>
-      <p style="margin-top:16px;">Online checkout is launching shortly. In the meantime, email <a href="mailto:hello@venturesdatasolutions.com">hello@venturesdatasolutions.com</a> with your county to claim it now.</p>
+
+      <label for="county-input" class="eyebrow" style="display:block;margin-bottom:8px;">Your county</label>
+      <input type="text" id="county-input" list="county-list" placeholder="Start typing your county&hellip;" autocomplete="off" class="county-input">
+      <datalist id="county-list"></datalist>
+      <p id="county-status" class="county-status" role="status"></p>
+
+      <button type="button" id="claim-btn" class="btn btn-primary" aria-disabled="true" disabled>Claim your county</button>
+      <p id="purchase-error" class="purchase-error" role="alert"></p>
+
+      <p style="margin-top:16px;">If we&rsquo;re unable to service your county, you&rsquo;ll be refunded in full within 1–7 business days.</p>
+      <p>Prefer email? Send your county to <a href="mailto:hello@venturesdatasolutions.com">hello@venturesdatasolutions.com</a>.</p>
     </div>
   </section>
 </main>
@@ -56,5 +65,6 @@
     <p class="footer-copyright">&copy; 2026 Venture$ Data Solutions. All rights reserved.</p>
   </div>
 </footer>
+<script src="assets/purchase.js" defer></script>
 </body>
 </html>
