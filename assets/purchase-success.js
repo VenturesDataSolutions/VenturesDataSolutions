@@ -15,8 +15,12 @@
     return;
   }
 
+  let requestInFlight = false;
+
   manageLink.addEventListener('click', async (event) => {
     event.preventDefault();
+    if (requestInFlight) return;
+    requestInFlight = true;
     errorEl.textContent = '';
     try {
       const response = await fetch(`${API_BASE}/portal-link?session_id=${encodeURIComponent(sessionId)}`);
@@ -28,6 +32,8 @@
       errorEl.textContent = data.error || 'Could not open the subscription portal. Please email us instead.';
     } catch (err) {
       errorEl.textContent = 'Could not open the subscription portal. Please email us instead.';
+    } finally {
+      requestInFlight = false;
     }
   });
 })();
