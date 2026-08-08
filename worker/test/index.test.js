@@ -103,6 +103,27 @@ async function main() {
   response = await workerModule.fetch(request, baseEnv(createFakeKV()));
   assert(response.status === 400, 'a malformed JSON body on /checkout should return 400');
 
+  // GET /portal-link happy path through the real route (query-string parsing + CORS)
+  const originalPortalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (url.includes('/checkout/sessions/')) {
+      return { ok: true, status: 200, json: async () => ({ id: 'cs_1', customer: 'cus_1' }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ url: 'https://billing.stripe.com/session/abc' }) };
+  };
+  try {
+    request = new Request('https://api.venturesdatasolutions.com/portal-link?session_id=cs_1', {
+      method: 'GET',
+      headers: { Origin: 'https://venturesdatasolutions.com' },
+    });
+    response = await workerModule.fetch(request, baseEnv(createFakeKV()));
+    body = await response.json();
+    assert(response.status === 200 && body.url === 'https://billing.stripe.com/session/abc', '/portal-link should return the Stripe Customer Portal URL');
+    assert(response.headers.get('Access-Control-Allow-Origin') === 'https://venturesdatasolutions.com', '/portal-link should carry CORS headers like every other route');
+  } finally {
+    globalThis.fetch = originalPortalFetch;
+  }
+
   console.log('PASS: index.test.js');
 }
 

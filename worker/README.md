@@ -88,6 +88,8 @@ npx wrangler kv key put --binding=COUNTY_LOCKS "settings:pricing_mode" "full"
 
 (Any value other than `"full"` — including an unset key — behaves as `"founding"`.)
 
+**Also update `purchase.html` by hand at the same time.** The price card there (`$150/mo`, "Founding rate" badge) is static marketing copy — it does not read the KV pricing mode, so flipping the KV key alone leaves the page advertising the old price while Stripe Checkout actually charges the new one. Stripe's own checkout page always shows the real, correct total before payment, so no one is overcharged — but a customer who expects $150 and sees $300 mid-checkout is a bad experience. Update the price card text (and commit + redeploy the static site) in the same step you flip the KV key.
+
 ## Running the Worker's own tests
 
 ```bash
