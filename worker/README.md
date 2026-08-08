@@ -13,18 +13,24 @@ See `docs/superpowers/specs/2026-08-07-stripe-worker-backend-design.md` for the 
 
 ## One-time setup (test mode)
 
-Run all of this from inside the `worker/` folder, with the [Stripe Dashboard](https://dashboard.stripe.com) in **test mode** and a Cloudflare account with `wrangler` installed (`npm install -g wrangler` or use `npx wrangler`).
+Run all of this from inside the `worker/` folder, with the [Stripe Dashboard](https://dashboard.stripe.com) in **test mode**.
+
+0. **Install dependencies** (pulls in the `wrangler` version pinned in `package.json`):
+
+   ```bash
+   npm install
+   ```
 
 1. **Log in to Cloudflare:**
 
    ```bash
-   wrangler login
+   npx wrangler login
    ```
 
 2. **Create the KV namespace** that stores county locks:
 
    ```bash
-   wrangler kv namespace create COUNTY_LOCKS
+   npx wrangler kv namespace create COUNTY_LOCKS
    ```
 
    This prints an `id`. Paste it into `wrangler.toml`, replacing `REPLACE_WITH_KV_NAMESPACE_ID`.
@@ -33,24 +39,24 @@ Run all of this from inside the `worker/` folder, with the [Stripe Dashboard](ht
    - A recurring price: $150.00/month.
    - A one-time price: $150.00.
 
-   Copy both Price IDs (`price_...`) into `wrangler.toml`, replacing `PRICE_REPLACE_WITH_RECURRING_PRICE_ID` and `PRICE_REPLACE_WITH_ONETIME_PRICE_ID`.
+   Copy both Price IDs (`price_...`) into `wrangler.toml`, replacing `price_REPLACE_WITH_RECURRING_PRICE_ID` and `price_REPLACE_WITH_ONETIME_PRICE_ID`.
 
 4. **Set the Stripe secret key** as a Worker secret (use your **test-mode** secret key first — starts with `sk_test_`):
 
    ```bash
-   wrangler secret put STRIPE_SECRET_KEY
+   npx wrangler secret put STRIPE_SECRET_KEY
    ```
 
-5. **Register the webhook endpoint** in the Stripe Dashboard (Developers → Webhooks → Add endpoint) pointing at `https://api.venturesdatasolutions.com/webhook`, subscribed to `checkout.session.completed` and `customer.subscription.deleted`. Copy the generated signing secret (`whsec_...`) and set it:
+5. **Register the webhook endpoint** in the Stripe Dashboard (Developers → Webhooks → Add endpoint) pointing at `https://api.venturesdatasolutions.com/webhook`, subscribed to `checkout.session.completed` and `customer.subscription.deleted`. Copy the generated signing secret (`whsec_...`) and set it. It's fine to register this before deploying (step 6) — Stripe doesn't verify the URL is reachable when you add the endpoint, only when it actually fires:
 
    ```bash
-   wrangler secret put STRIPE_WEBHOOK_SECRET
+   npx wrangler secret put STRIPE_WEBHOOK_SECRET
    ```
 
 6. **Deploy:**
 
    ```bash
-   wrangler deploy
+   npx wrangler deploy
    ```
 
 7. Confirm DNS: `api.venturesdatasolutions.com` needs a Cloudflare-proxied record so the custom domain route in `wrangler.toml` resolves — Cloudflare's dashboard will prompt for this on first deploy if it isn't already set up.
@@ -58,7 +64,7 @@ Run all of this from inside the `worker/` folder, with the [Stripe Dashboard](ht
 ## Local development
 
 ```bash
-wrangler dev
+npx wrangler dev
 ```
 
 Runs the Worker locally (default `http://localhost:8787`), using the same KV namespace and secrets as configured above (`wrangler dev` uses your real bound resources by default unless you pass `--local`). The frontend (`assets/purchase.js`, `assets/purchase-success.js`) automatically points at `http://localhost:8787` when the site itself is opened from `localhost`/`127.0.0.1`.
@@ -77,7 +83,7 @@ Switching to live Stripe keys is a separate, deliberate step, done only after th
 Once VDS is full, flip the pricing mode with a single KV write — no redeploy:
 
 ```bash
-wrangler kv key put --binding=COUNTY_LOCKS "settings:pricing_mode" "full"
+npx wrangler kv key put --binding=COUNTY_LOCKS "settings:pricing_mode" "full"
 ```
 
 (Any value other than `"full"` — including an unset key — behaves as `"founding"`.)
