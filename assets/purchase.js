@@ -51,6 +51,12 @@
     try {
       const response = await fetch(`${API_BASE}/availability/${countyId}`);
       const data = await response.json();
+      // Ignore a stale response if the user has since selected a different county.
+      if (countyId !== selectedCountyId) return;
+      if (!response.ok) {
+        setStatus('Could not check availability. Try again.', false);
+        return;
+      }
       if (data.available) {
         setStatus('Available — this county is unclaimed.', true);
         enableClaim();
@@ -58,6 +64,7 @@
         setStatus('Already claimed by another subscriber.', false);
       }
     } catch (err) {
+      if (countyId !== selectedCountyId) return;
       setStatus('Could not check availability. Try again.', false);
     }
   }
@@ -71,7 +78,11 @@
     } else {
       selectedCountyId = null;
       disableClaim();
-      clearStatus();
+      if (input.value.trim() === '') {
+        clearStatus();
+      } else {
+        setStatus('No matching county — please select one from the list.', false);
+      }
     }
   });
 
