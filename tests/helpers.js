@@ -3,9 +3,10 @@ const path = require('path');
 
 const NAV_LINKS = [
   ['index.html', 'Home'],
-  ['how-it-works.html', 'How it works'],
-  ['pricing.html', 'Pricing'],
+  ['platform.html', 'Platform'],
+  ['county-data.html', 'County Data'],
   ['faq.html', 'FAQ'],
+  ['what-we-do.html', 'What We Do'],
   ['contact.html', 'Contact'],
 ];
 

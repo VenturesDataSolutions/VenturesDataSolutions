@@ -4,7 +4,7 @@ Static marketing + purchase site for Venture$ Data Solutions (VDS), backed by a 
 
 ## What's here
 
-- Root-level `.html` files — the static site (Home, How It Works, Pricing, Purchase, Purchase Success, FAQ, Contact, Terms, Privacy).
+- Root-level `.html` files — the static site (Home, Platform, Investors, Agents, County Data, How It Works, Purchase, Purchase Success, FAQ, What We Do, Contact, Terms, Privacy).
 - `assets/` — brand assets (logo, icon, `styles.css`, `counties.json`), plus `purchase.js` / `purchase-success.js` (the only JS on the site).
 - `scripts/build-counties.js` — one-time generator for `assets/counties.json` / `worker/data/counties.json` from the U.S. Census Bureau's county FIPS reference file. Re-run only if the county list ever needs regenerating.
 - `worker/` — the Cloudflare Worker source for the Stripe + county-lock backend. Deploys separately from the static site, via `wrangler`, not GitHub Pages. See `worker/README.md` for setup and deploy instructions.

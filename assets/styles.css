@@ -153,6 +153,96 @@ a { color: inherit; }
 .price-card .amount { font-family: 'Fraunces', serif; font-weight: 800; font-size: 56px; color: var(--gold); }
 .price-card .amount .unit { font-family: 'IBM Plex Mono', monospace; font-size: 16px; color: rgba(245,240,225,0.6); }
 
+/* Tiered pricing (Investors / Agents) */
+.tier-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 24px;
+  margin-top: 32px;
+  align-items: stretch;
+}
+.tier-card {
+  background: var(--cream);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+}
+.tier-card.tier-featured {
+  background: var(--forest);
+  color: var(--cream);
+  border-color: var(--forest);
+}
+.tier-name {
+  font-family: 'Fraunces', serif;
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--forest);
+  margin-bottom: 2px;
+}
+.tier-featured .tier-name { color: var(--cream); }
+.tier-tagline {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 20px;
+}
+.tier-price-row { margin-bottom: 20px; }
+.tier-setup {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px;
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+.tier-care {
+  font-family: 'Fraunces', serif;
+  font-weight: 800;
+  font-size: 28px;
+  color: var(--gold);
+}
+.tier-care .unit {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 14px;
+  color: inherit;
+  opacity: 0.7;
+}
+.tier-features {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 24px;
+  flex-grow: 1;
+}
+.tier-features li {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.tier-featured .tier-features li { border-bottom-color: rgba(245, 240, 225, 0.22); }
+.tier-features li:last-child { border-bottom: none; }
+
+/* Callout box (framing statements, unstructured-data capability) */
+.callout {
+  background: #ECE4CC;
+  border-left: 4px solid var(--gold);
+  border-radius: 2px;
+  padding: 20px 24px;
+  margin: 32px 0;
+}
+.callout p:last-child { margin-bottom: 0; }
+.callout-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--forest);
+  opacity: 0.7;
+  display: block;
+  margin-bottom: 6px;
+}
+
 /* FAQ */
 .faq-item { border-bottom: 1px solid var(--line); padding: 24px 0; }
 .faq-item h3 { font-size: 20px; margin-bottom: 8px; }
