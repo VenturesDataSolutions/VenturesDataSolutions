@@ -10,6 +10,13 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 [vars]
 AI_PROVIDER = "openrouter"
 
+[[r2_buckets]]
+binding = "RECEIPTS_BUCKET"
+bucket_name = "expense-intake-receipts"
+
+[images]
+binding = "IMAGES"
+
 # KV namespace (conversation state: house-selection pending, correction window),
-# R2 bucket (receipt photos), routes, and [[triggers]] cron entries are added in
-# later Build Order steps (3, 5-7) once the code that uses them exists.
+# routes, and [[triggers]] cron entries are added in later Build Order steps
+# (5-7) once the code that uses them exists.

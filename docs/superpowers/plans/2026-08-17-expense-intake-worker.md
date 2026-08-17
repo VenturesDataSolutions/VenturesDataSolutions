@@ -1,6 +1,6 @@
 # Expense Intake Worker Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 >
 > **Note on scope:** This plan is filled in incrementally, one Build Order step at a time, per explicit instruction from the project owner ("Start at step 1 and confirm with me before moving to step 2"). Only the tasks for the current Build Order step are written in full bite-sized detail; later steps are listed as placeholders in the Build Order Map below and get their own Task sections appended after each checkpoint is approved.
 >
@@ -426,7 +426,7 @@ generateSmsCopy(type, vars) -> string
 
 This module is imported by both adapters so the taxonomy, prompt wording, and output validation live in exactly one place (DRY) — an OpenRouter-only bug in categorization logic would otherwise be impossible to distinguish from an Anthropic-only one.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/providers/shared.test.js
@@ -520,12 +520,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: fails with a module-not-found error for `../../src/providers/shared.js` (it doesn't exist yet).
 
-- [ ] **Step 3: Write the shared module**
+- [x] **Step 3: Write the shared module**
 
 ```js
 // expense-intake/src/providers/shared.js
@@ -640,7 +640,7 @@ export function normalizeParseExpenseResult(raw) {
 }
 ```
 
-- [ ] **Step 4: Wire the new test into the runner**
+- [x] **Step 4: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -651,12 +651,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `PASS: schema.test.js`, `PASS: providers/shared.test.js`, `PASS: index.test.js`, `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change (do not commit yet — held for review)**
+- [x] **Step 6: Stage the change (do not commit yet — held for review)**
 
 ```bash
 git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js expense-intake/test/run-all.js
@@ -673,7 +673,7 @@ git add expense-intake/src/providers/shared.js expense-intake/test/providers/sha
 
 OpenAI-compatible chat completions schema, model pinned to `anthropic/claude-sonnet-4.5` per spec. Used for development (`AI_PROVIDER=openrouter`, the default).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/providers/openrouter.test.js
@@ -741,12 +741,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/openrouter.test.js`
 Expected: fails with a module-not-found error for `../../src/providers/openrouter.js`.
 
-- [ ] **Step 3: Write the adapter**
+- [x] **Step 3: Write the adapter**
 
 ```js
 // expense-intake/src/providers/openrouter.js
@@ -807,7 +807,7 @@ export async function openRouterGenerateSmsCopy({ apiKey, type, vars, fetchImpl 
 }
 ```
 
-- [ ] **Step 4: Wire the new test into the runner**
+- [x] **Step 4: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -819,12 +819,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all four test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change (do not commit yet — held for review)**
+- [x] **Step 6: Stage the change (do not commit yet — held for review)**
 
 ```bash
 git add expense-intake/src/providers/openrouter.js expense-intake/test/providers/openrouter.test.js expense-intake/test/run-all.js
@@ -841,7 +841,7 @@ git add expense-intake/src/providers/openrouter.js expense-intake/test/providers
 
 Native Messages API against `api.anthropic.com`, model pinned to `claude-sonnet-4-5-20250929` (confirmed with project owner — see Design decisions above). Used in production (`AI_PROVIDER=anthropic`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/providers/anthropic.test.js
@@ -910,12 +910,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/anthropic.test.js`
 Expected: fails with a module-not-found error for `../../src/providers/anthropic.js`.
 
-- [ ] **Step 3: Write the adapter**
+- [x] **Step 3: Write the adapter**
 
 ```js
 // expense-intake/src/providers/anthropic.js
@@ -972,7 +972,7 @@ export async function anthropicGenerateSmsCopy({ apiKey, type, vars, fetchImpl }
 }
 ```
 
-- [ ] **Step 4: Wire the new test into the runner**
+- [x] **Step 4: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -985,12 +985,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all five test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change (do not commit yet — held for review)**
+- [x] **Step 6: Stage the change (do not commit yet — held for review)**
 
 ```bash
 git add expense-intake/src/providers/anthropic.js expense-intake/test/providers/anthropic.test.js expense-intake/test/run-all.js
@@ -1008,7 +1008,7 @@ git add expense-intake/src/providers/anthropic.js expense-intake/test/providers/
 
 This is the only module the rest of the Worker ever imports from `src/providers/` — it reads `env.AI_PROVIDER` and dispatches to whichever adapter is active, so no other code needs to know OpenRouter and Anthropic adapters exist at all.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/providers/index.test.js
@@ -1074,12 +1074,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/index.test.js`
 Expected: fails with a module-not-found error for `../../src/providers/index.js`.
 
-- [ ] **Step 3: Write the selector**
+- [x] **Step 3: Write the selector**
 
 ```js
 // expense-intake/src/providers/index.js
@@ -1104,7 +1104,7 @@ export async function generateSmsCopy(type, vars, env, deps = {}) {
 }
 ```
 
-- [ ] **Step 4: Wire the new test into the runner**
+- [x] **Step 4: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -1118,12 +1118,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all six test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Update the README's Status section and document the two new secrets**
+- [x] **Step 6: Update the README's Status section and document the two new secrets**
 
 ```markdown
 // expense-intake/README.md — replace the existing "## Status" section, append a new section after "## D1 setup"
@@ -1152,7 +1152,7 @@ Set both even in development — flipping `AI_PROVIDER` to `anthropic` in
 round-trip.
 ```
 
-- [ ] **Step 7: Stage the change (do not commit yet — held for review)**
+- [x] **Step 7: Stage the change (do not commit yet — held for review)**
 
 ```bash
 git add expense-intake/src/providers/index.js expense-intake/test/providers/index.test.js expense-intake/test/run-all.js expense-intake/README.md
@@ -1169,3 +1169,773 @@ git add expense-intake/src/providers/index.js expense-intake/test/providers/inde
 **Type consistency:** `input` shape `{ text, image }` and `image` shape `{ base64, mediaType }` are used identically across Task 4's `openRouterParseExpense`, Task 5's `anthropicParseExpense`, and Task 6's `parseExpense` selector. The five-key parsed-result shape (`vendor`, `amount`, `category`, `confidence`, `raw_text`) is defined once in Task 3's `normalizeParseExpenseResult` and never redefined elsewhere — both adapters call it rather than re-validating independently, so a taxonomy or clamping change only has one place to edit. `generateSmsCopy(type, vars, env, deps)`'s parameter order matches between the Task 6 selector and both adapters' internal calls.
 
 **Deferred to later Build Order steps (intentional, not a gap):** image preprocessing/resizing (step 3), what happens when `normalizeParseExpenseResult` throws — i.e. routing a parse failure to `pending_review` (step 4), the 10-minute correction window and house-selection KV state (step 5), and wiring `parseExpense`/`generateSmsCopy` into the actual Twilio message flow (step 4). Task 6's Design decisions note above explains why each is out of scope here.
+
+---
+
+## Step 3: Twilio inbound webhook → R2 photo storage
+
+**Interface (from spec, MESSAGE FLOW steps 1-2):** client texts a photo or plain text to their Twilio number → Worker receives the webhook → if a photo is attached, resize/compress it and store it in R2 immediately (before any parsing, since Twilio media URLs expire fast) → respond to Twilio. Parsing, categorization, Sheets writes, and confirmation SMS content are Build Order step 4 — out of scope here.
+
+**Design decisions locked in for this step (researched against current Cloudflare/Twilio docs, not guessed):**
+
+- **Image resize/recompress uses the Cloudflare Images Workers Binding** (`env.IMAGES.input(stream).transform({...}).output({...})`), per the project owner's explicit choice over a bundled WASM library. This requires enabling the Cloudflare Images product on the account (free tier covers 5,000 transformations/month — no card required beyond what's already needed for the other Cloudflare products this project uses) and adding an `[images]` binding to `wrangler.toml`. **There is no local emulation for this binding** — `wrangler dev` needs the `--remote` flag to exercise it for real. The plain-Node test suite can only verify the *wrapper* logic around the binding (via a fake `env.IMAGES`-shaped object, same pattern as `fetchImpl` injection elsewhere in this codebase) — the actual Cloudflare-side resize/encode behavior can only be confirmed by the project owner running `wrangler dev --remote` (or a real deploy) once Images is enabled and a database/bucket exist, which is outside what an agent can do from this session. Cap on longest side (1568px, per spec) is implemented as `width: 1568, height: 1568, fit: 'scale-down'` — a bounding-box constraint that shrinks to fit within 1568×1568 while preserving aspect ratio and never upscaling (confirmed against Cloudflare's Images docs: `scale-down` "never enlarges"; setting both dimensions makes it a box constraint rather than a single-axis resize, which matters because a *single*-axis constraint would only cap width or height, not "whichever side is longest").
+- **Twilio signature verification** (`X-Twilio-Signature` header) follows Twilio's documented algorithm exactly: HMAC-SHA1 over `<full webhook URL><sorted POST param keys, each key+value concatenated directly with no delimiters>`, keyed by the Auth Token, base64-encoded, compared with a timing-safe comparison — same structural pattern as `worker/src/webhook.js`'s Stripe signature verification (HMAC + timing-safe compare), adapted to Twilio's specific string-to-sign format (confirmed against Twilio's webhook security docs, distinct from Stripe's `t=...,v1=...` format). An invalid or missing signature returns 403 and nothing is fetched or stored — this is the first thing checked, before any Twilio media URL is touched.
+- **R2 key scheme:** `receipts/<url-encoded Twilio "To" number>/<timestamp>-<uuid>.jpg`. The "To" number is used (not a `client_id`) because resolving `To` → `client_id` requires a D1 query, and D1/client lookups are out of scope for this step (Build Order step 4 owns parsing and the client/house resolution that create real `expenses`/`pending_review` rows referencing this key). `clients.twilio_number` is UNIQUE per the Step 1 schema, so the "To" number is already a stable per-client partition even before any D1 lookup happens.
+- **Only the first attached photo is processed** (`MediaUrl0`) if a message has multiple attachments — the spec's MESSAGE FLOW and DATA MODEL both model one photo per expense; multi-photo messages aren't addressed anywhere in the spec, so this is a reasonable scope boundary rather than a gap. Text-only messages (no media) are accepted and get a 200/empty-TwiML response with nothing stored — that message's actual parsing happens in step 4.
+- **On a photo-storage failure** (Twilio media fetch fails, or the Images/R2 calls throw), the webhook returns 500 rather than swallowing the error and returning 200. Twilio retries webhook delivery on a non-2xx response — since the spec calls out "if this step fails, the photo is lost" as the reason storage happens before parsing, surfacing the failure (so Twilio retries) is more consistent with that stated goal than silently acknowledging receipt of a photo that was never saved.
+- **Twilio media authentication**: Twilio requires HTTP Basic Auth (`TWILIO_ACCOUNT_SID:TWILIO_AUTH_TOKEN`) to fetch a `MediaUrl` — both secrets are already in the spec's SECRETS list from the original brief, just unused until now.
+- Follows the same architectural split already established in `worker/`: pure `src/handlers.js` functions taking explicit dependencies (testable with `fetchImpl` injection and fake bindings, no real network/Cloudflare product needed), with `src/index.js` as the thin router. Two new fake test doubles (`test/fake-images.js`, `test/fake-r2.js`) mirror the existing `worker/test/fake-kv.js` pattern.
+
+### Task 7: Twilio webhook signature verification and body parsing
+
+**Files:**
+- Create: `expense-intake/src/twilio.js`
+- Create: `expense-intake/test/twilio.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [x] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/twilio.test.js
+import crypto from 'node:crypto';
+import { parseFormBody, verifyTwilioSignature, extractWebhookFields } from '../src/twilio.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function computeExpectedSignature(url, params, authToken) {
+  const sortedKeys = Object.keys(params).sort();
+  let stringToSign = url;
+  for (const key of sortedKeys) {
+    stringToSign += key + params[key];
+  }
+  return crypto.createHmac('sha1', authToken).update(stringToSign).digest('base64');
+}
+
+async function main() {
+  // parseFormBody
+  const params = parseFormBody('From=%2B15551234567&To=%2B15559876543&Body=Home+Depot+%2442.50&NumMedia=1&MediaUrl0=https%3A%2F%2Fapi.twilio.com%2Fmedia%2FME123');
+  assert(params.From === '+15551234567', 'parseFormBody must URL-decode field values');
+  assert(params.Body === 'Home Depot $42.50', 'parseFormBody must decode + as space');
+  assert(params.NumMedia === '1', 'parseFormBody must expose NumMedia as a string field');
+
+  // verifyTwilioSignature: valid signature
+  const url = 'https://expense-intake.example.com/sms';
+  const authToken = 'test_auth_token';
+  const goodParams = { From: '+15551234567', To: '+15559876543', Body: 'Home Depot $42.50' };
+  const validSig = computeExpectedSignature(url, goodParams, authToken);
+  const validResult = await verifyTwilioSignature({ url, params: goodParams, signature: validSig, authToken });
+  assert(validResult === true, 'a correctly computed signature must verify as valid');
+
+  // verifyTwilioSignature: tampered signature
+  const tamperedResult = await verifyTwilioSignature({ url, params: goodParams, signature: 'not-the-real-signature==', authToken });
+  assert(tamperedResult === false, 'a tampered/incorrect signature must not verify');
+
+  // verifyTwilioSignature: tampered params (same signature, different body)
+  const tamperedParams = { ...goodParams, Body: 'Home Depot $999.99' };
+  const tamperedParamsResult = await verifyTwilioSignature({ url, params: tamperedParams, signature: validSig, authToken });
+  assert(tamperedParamsResult === false, 'a signature computed for different params must not verify against altered params');
+
+  // verifyTwilioSignature: missing signature or authToken
+  assert((await verifyTwilioSignature({ url, params: goodParams, signature: '', authToken })) === false, 'an empty signature must not verify');
+  assert((await verifyTwilioSignature({ url, params: goodParams, signature: validSig, authToken: '' })) === false, 'a missing authToken must not verify');
+
+  // extractWebhookFields: text-only message
+  const textOnly = extractWebhookFields({ From: '+15551234567', To: '+15559876543', Body: 'Home Depot $42.50', NumMedia: '0' });
+  assert(textOnly.from === '+15551234567' && textOnly.to === '+15559876543' && textOnly.body === 'Home Depot $42.50', 'extractWebhookFields must extract From/To/Body');
+  assert(textOnly.media.length === 0, 'a text-only message must have an empty media array');
+
+  // extractWebhookFields: message with one photo
+  const withPhoto = extractWebhookFields({
+    From: '+15551234567', To: '+15559876543', Body: '', NumMedia: '1',
+    MediaUrl0: 'https://api.twilio.com/media/ME123', MediaContentType0: 'image/jpeg',
+  });
+  assert(withPhoto.media.length === 1, 'a message with NumMedia=1 must produce one media entry');
+  assert(withPhoto.media[0].url === 'https://api.twilio.com/media/ME123' && withPhoto.media[0].contentType === 'image/jpeg', 'the media entry must carry the URL and content type');
+
+  // extractWebhookFields: NumMedia present but the indexed field is missing (defensive)
+  const malformed = extractWebhookFields({ From: '+1', To: '+2', Body: '', NumMedia: '2', MediaUrl0: 'https://api.twilio.com/media/ME1', MediaContentType0: 'image/jpeg' });
+  assert(malformed.media.length === 1, 'a missing MediaUrl at a given index must be skipped rather than producing a broken entry');
+
+  console.log('PASS: twilio.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/twilio.test.js`
+Expected: fails with a module-not-found error for `../src/twilio.js`.
+
+- [x] **Step 3: Write the module**
+
+```js
+// expense-intake/src/twilio.js
+
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+function bufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+export function parseFormBody(text) {
+  return Object.fromEntries(new URLSearchParams(text));
+}
+
+// Twilio's request-signing algorithm: HMAC-SHA1(authToken, url + sortedKey1 + value1 + sortedKey2 + value2 + ...),
+// base64-encoded. https://www.twilio.com/docs/usage/webhooks/webhooks-security
+export async function verifyTwilioSignature({ url, params, signature, authToken }) {
+  if (!signature || !authToken) return false;
+
+  const sortedKeys = Object.keys(params).sort();
+  let stringToSign = url;
+  for (const key of sortedKeys) {
+    stringToSign += key + params[key];
+  }
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(authToken),
+    { name: 'HMAC', hash: 'SHA-1' },
+    false,
+    ['sign']
+  );
+  const signed = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(stringToSign));
+  const expected = bufferToBase64(signed);
+
+  return timingSafeEqual(expected, signature);
+}
+
+export function extractWebhookFields(params) {
+  const numMedia = Number.parseInt(params.NumMedia || '0', 10) || 0;
+  const media = [];
+  for (let i = 0; i < numMedia; i++) {
+    const mediaUrl = params[`MediaUrl${i}`];
+    if (mediaUrl) {
+      media.push({ url: mediaUrl, contentType: params[`MediaContentType${i}`] || 'application/octet-stream' });
+    }
+  }
+  return { from: params.From || '', to: params.To || '', body: params.Body || '', media };
+}
+```
+
+- [x] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 5: Run test to verify it passes**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all seven test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 8: Receipt photo storage pipeline (resize/recompress via Cloudflare Images, store to R2)
+
+**Files:**
+- Create: `expense-intake/src/receipt-storage.js`
+- Create: `expense-intake/test/fake-images.js`
+- Create: `expense-intake/test/fake-r2.js`
+- Create: `expense-intake/test/receipt-storage.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [x] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/fake-images.js
+// Mimics the shape of the real Cloudflare Images Workers binding (env.IMAGES) closely enough
+// to test the calling code's wiring, without needing the real binding (which has no local
+// emulation — see Step 3's Design decisions note in the plan).
+export function createFakeImagesBinding(outputBytes) {
+  const calls = [];
+  return {
+    input(source) {
+      const call = { source, transformOptions: null, outputOptions: null };
+      calls.push(call);
+      const chain = {
+        transform(options) {
+          call.transformOptions = options;
+          return chain;
+        },
+        async output(options) {
+          call.outputOptions = options;
+          return {
+            response() {
+              return { arrayBuffer: async () => outputBytes };
+            },
+          };
+        },
+      };
+      return chain;
+    },
+    calls,
+  };
+}
+```
+
+```js
+// expense-intake/test/fake-r2.js
+export function createFakeR2Bucket() {
+  const store = new Map();
+  return {
+    async put(key, value, options) {
+      store.set(key, { value, options });
+    },
+    async get(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    _store: store,
+  };
+}
+```
+
+```js
+// expense-intake/test/receipt-storage.test.js
+import { generateReceiptKey, storeReceiptPhoto } from '../src/receipt-storage.js';
+import { createFakeImagesBinding } from './fake-images.js';
+import { createFakeR2Bucket } from './fake-r2.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function fakeFetch(ok, status, body) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    return { ok, status, body };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+async function main() {
+  // generateReceiptKey format
+  const key = generateReceiptKey('+15559876543');
+  assert(/^receipts\/%2B15559876543\/\d+-[0-9a-f-]{36}\.jpg$/.test(key), `generateReceiptKey must produce a receipts/<encoded-number>/<timestamp>-<uuid>.jpg key, got: ${key}`);
+
+  // storeReceiptPhoto: happy path — fetches with Basic Auth, transforms via Images binding, stores to R2
+  const mediaBody = { fake: 'stream' };
+  const fetchImpl = fakeFetch(true, 200, mediaBody);
+  const jpegBytes = new ArrayBuffer(8);
+  const imagesBinding = createFakeImagesBinding(jpegBytes);
+  const bucket = createFakeR2Bucket();
+
+  const resultKey = await storeReceiptPhoto({
+    mediaUrl: 'https://api.twilio.com/media/ME123',
+    accountSid: 'AC_test',
+    authToken: 'auth_test',
+    imagesBinding,
+    bucket,
+    key: 'receipts/test/123.jpg',
+    fetchImpl,
+  });
+
+  assert(resultKey === 'receipts/test/123.jpg', 'storeReceiptPhoto must return the key it was given');
+  assert(fetchImpl.calls[0].url === 'https://api.twilio.com/media/ME123', 'must fetch the exact Twilio media URL');
+  const expectedAuth = `Basic ${Buffer.from('AC_test:auth_test').toString('base64')}`;
+  assert(fetchImpl.calls[0].init.headers.Authorization === expectedAuth, 'must send Twilio account SID/auth token as Basic Auth');
+  assert(imagesBinding.calls[0].source === mediaBody, 'must pass the fetched media response body into the Images binding');
+  assert(imagesBinding.calls[0].transformOptions.width === 1568 && imagesBinding.calls[0].transformOptions.height === 1568, 'must cap both dimensions at 1568px');
+  assert(imagesBinding.calls[0].transformOptions.fit === 'scale-down', 'must use scale-down fit so smaller images are never upscaled');
+  assert(imagesBinding.calls[0].outputOptions.format === 'image/jpeg' && imagesBinding.calls[0].outputOptions.quality === 85, 'must re-encode as JPEG at quality 85');
+  const stored = bucket._store.get('receipts/test/123.jpg');
+  assert(stored.value === jpegBytes, 'must store the transformed JPEG bytes in R2 under the given key');
+  assert(stored.options.httpMetadata.contentType === 'image/jpeg', 'must set the R2 object content type to image/jpeg');
+
+  // storeReceiptPhoto: Twilio media fetch failure
+  const failFetch = fakeFetch(false, 404, null);
+  let threw = false;
+  try {
+    await storeReceiptPhoto({
+      mediaUrl: 'https://api.twilio.com/media/ME_missing',
+      accountSid: 'AC_test',
+      authToken: 'auth_test',
+      imagesBinding: createFakeImagesBinding(jpegBytes),
+      bucket: createFakeR2Bucket(),
+      key: 'receipts/test/456.jpg',
+      fetchImpl: failFetch,
+    });
+  } catch (err) {
+    threw = true;
+    assert(/404/.test(err.message), 'the error must surface the failed status code');
+  }
+  assert(threw, 'a failed Twilio media fetch must throw rather than silently store nothing');
+
+  console.log('PASS: receipt-storage.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/receipt-storage.test.js`
+Expected: fails with a module-not-found error for `../src/receipt-storage.js`.
+
+- [x] **Step 3: Write the module**
+
+```js
+// expense-intake/src/receipt-storage.js
+const MAX_DIMENSION = 1568;
+const JPEG_QUALITY = 85;
+
+export function generateReceiptKey(toNumber) {
+  return `receipts/${encodeURIComponent(toNumber || 'unknown')}/${Date.now()}-${crypto.randomUUID()}.jpg`;
+}
+
+export async function storeReceiptPhoto({ mediaUrl, accountSid, authToken, imagesBinding, bucket, key, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+  const mediaResponse = await doFetch(mediaUrl, { headers: { Authorization: `Basic ${basicAuth}` } });
+  if (!mediaResponse.ok) {
+    throw new Error(`Failed to fetch Twilio media: ${mediaResponse.status}`);
+  }
+
+  const transformed = await imagesBinding
+    .input(mediaResponse.body)
+    .transform({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'scale-down' })
+    .output({ format: 'image/jpeg', quality: JPEG_QUALITY });
+  const jpegBytes = await transformed.response().arrayBuffer();
+
+  await bucket.put(key, jpegBytes, { httpMetadata: { contentType: 'image/jpeg' } });
+  return key;
+}
+```
+
+- [x] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 5: Run test to verify it passes**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all eight test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/receipt-storage.js expense-intake/test/fake-images.js expense-intake/test/fake-r2.js expense-intake/test/receipt-storage.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 9: Wire the `/sms` route (handlers.js + index.js), R2/Images bindings, and docs
+
+**Files:**
+- Create: `expense-intake/src/handlers.js`
+- Create: `expense-intake/test/handlers.test.js`
+- Modify: `expense-intake/src/index.js`
+- Modify: `expense-intake/test/index.test.js`
+- Modify: `expense-intake/test/run-all.js`
+- Modify: `expense-intake/wrangler.toml`
+- Modify: `expense-intake/README.md`
+
+This follows the same split as `worker/`: `handlers.js` holds pure, exhaustively-tested request-handling logic (dependency-injected, no real I/O in tests); `index.js` stays a thin router, checked with a lighter integration-level test (real `fetch` handler, `globalThis.fetch` monkey-patched for the one case that needs a real-shaped network call — same pattern `worker/test/index.test.js` already uses for its `/checkout` and `/portal-link` tests).
+
+- [x] **Step 1: Write the failing tests**
+
+```js
+// expense-intake/test/handlers.test.js
+import crypto from 'node:crypto';
+import { handleSmsWebhook } from '../src/handlers.js';
+import { createFakeImagesBinding } from './fake-images.js';
+import { createFakeR2Bucket } from './fake-r2.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function computeTwilioSignature(url, params, authToken) {
+  const sortedKeys = Object.keys(params).sort();
+  let stringToSign = url;
+  for (const key of sortedKeys) {
+    stringToSign += key + params[key];
+  }
+  return crypto.createHmac('sha1', authToken).update(stringToSign).digest('base64');
+}
+
+function fakeFetch(ok, status, body) {
+  return async () => ({ ok, status, body });
+}
+
+async function main() {
+  const authToken = 'test_auth_token';
+  const url = 'https://expense-intake.example.com/sms';
+
+  // invalid signature -> 403, nothing stored
+  const rejectedBucket = createFakeR2Bucket();
+  let result = await handleSmsWebhook({
+    url, bodyText: 'From=%2B1555&To=%2B1556&Body=hi&NumMedia=0', signature: 'bad-sig',
+    accountSid: 'AC_test', authToken, imagesBinding: createFakeImagesBinding(new ArrayBuffer(0)), bucket: rejectedBucket,
+  });
+  assert(result.status === 403, 'an invalid signature must return 403');
+  assert(rejectedBucket._store.size === 0, 'nothing should be stored when the signature is invalid');
+
+  // valid signature, text-only -> 200, TwiML, nothing stored
+  const textParams = { From: '+15551234567', To: '+15559876543', Body: 'hello', NumMedia: '0' };
+  const textBody = new URLSearchParams(textParams).toString();
+  const textSig = computeTwilioSignature(url, textParams, authToken);
+  const textBucket = createFakeR2Bucket();
+  result = await handleSmsWebhook({
+    url, bodyText: textBody, signature: textSig,
+    accountSid: 'AC_test', authToken, imagesBinding: createFakeImagesBinding(new ArrayBuffer(0)), bucket: textBucket,
+  });
+  assert(result.status === 200 && result.contentType === 'text/xml' && result.body.includes('<Response>'), 'a text-only message must return 200 with TwiML');
+  assert(textBucket._store.size === 0, 'a text-only message must not store anything to R2');
+
+  // valid signature, with photo -> 200, photo stored
+  const photoParams = {
+    From: '+15551234567', To: '+15559876543', Body: '', NumMedia: '1',
+    MediaUrl0: 'https://api.twilio.com/media/ME123', MediaContentType0: 'image/jpeg',
+  };
+  const photoBody = new URLSearchParams(photoParams).toString();
+  const photoSig = computeTwilioSignature(url, photoParams, authToken);
+  const photoBucket = createFakeR2Bucket();
+  const photoFetch = fakeFetch(true, 200, { fake: 'stream' });
+  result = await handleSmsWebhook({
+    url, bodyText: photoBody, signature: photoSig,
+    accountSid: 'AC_test', authToken, imagesBinding: createFakeImagesBinding(new ArrayBuffer(8)), bucket: photoBucket, fetchImpl: photoFetch,
+  });
+  assert(result.status === 200, 'a message with a photo must return 200');
+  assert(photoBucket._store.size === 1, 'a message with a photo must store exactly one object');
+
+  // valid signature, photo storage fails -> 500, so Twilio retries delivery
+  const failParams = {
+    From: '+15551234567', To: '+15559876543', Body: '', NumMedia: '1',
+    MediaUrl0: 'https://api.twilio.com/media/ME_missing', MediaContentType0: 'image/jpeg',
+  };
+  const failBody = new URLSearchParams(failParams).toString();
+  const failSig = computeTwilioSignature(url, failParams, authToken);
+  const failFetch = fakeFetch(false, 404, null);
+  result = await handleSmsWebhook({
+    url, bodyText: failBody, signature: failSig,
+    accountSid: 'AC_test', authToken, imagesBinding: createFakeImagesBinding(new ArrayBuffer(8)), bucket: createFakeR2Bucket(), fetchImpl: failFetch,
+  });
+  assert(result.status === 500, 'a failed photo storage must return 500 so Twilio retries delivery');
+
+  console.log('PASS: handlers.test.js');
+}
+
+await main();
+```
+
+```js
+// expense-intake/test/index.test.js — full replacement of the existing file
+import crypto from 'node:crypto';
+import workerModule from '../src/index.js';
+import { createFakeImagesBinding } from './fake-images.js';
+import { createFakeR2Bucket } from './fake-r2.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function computeTwilioSignature(url, params, authToken) {
+  const sortedKeys = Object.keys(params).sort();
+  let stringToSign = url;
+  for (const key of sortedKeys) {
+    stringToSign += key + params[key];
+  }
+  return crypto.createHmac('sha1', authToken).update(stringToSign).digest('base64');
+}
+
+async function main() {
+  // unrouted requests still 404
+  let request = new Request('https://expense-intake.example.com/', { method: 'GET' });
+  let response = await workerModule.fetch(request, {});
+  assert(response.status === 404, 'unrouted requests should 404');
+
+  const authToken = 'test_auth_token';
+  const smsUrl = 'https://expense-intake.example.com/sms';
+  function baseEnv(imagesBinding, bucket) {
+    return {
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: authToken,
+      IMAGES: imagesBinding,
+      RECEIPTS_BUCKET: bucket,
+    };
+  }
+
+  // POST /sms with an invalid signature is rejected, through the real routing layer
+  const rejectedBucket = createFakeR2Bucket();
+  request = new Request(smsUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': 'not-a-real-signature' },
+    body: 'From=%2B15551234567&To=%2B15559876543&Body=hello&NumMedia=0',
+  });
+  response = await workerModule.fetch(request, baseEnv(createFakeImagesBinding(new ArrayBuffer(0)), rejectedBucket));
+  assert(response.status === 403, 'an invalid Twilio signature must be rejected with 403 through the real route');
+
+  // POST /sms, text-only message with a valid signature, through the real routing layer
+  const textParams = { From: '+15551234567', To: '+15559876543', Body: 'hello', NumMedia: '0' };
+  const textSig = computeTwilioSignature(smsUrl, textParams, authToken);
+  const textBucket = createFakeR2Bucket();
+  request = new Request(smsUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': textSig },
+    body: new URLSearchParams(textParams).toString(),
+  });
+  response = await workerModule.fetch(request, baseEnv(createFakeImagesBinding(new ArrayBuffer(0)), textBucket));
+  assert(response.status === 200, 'a validly signed text-only message should return 200 through the real route');
+  assert(response.headers.get('Content-Type') === 'text/xml', 'the response to Twilio must be TwiML (text/xml)');
+  const textBody = await response.text();
+  assert(textBody.includes('<Response>'), 'the response body must be valid (if minimal) TwiML');
+  assert(textBucket._store.size === 0, 'a text-only message must not store anything to R2');
+
+  // POST /sms, message with a photo and a valid signature — the one case that needs a
+  // network-shaped fetch (Twilio media fetch), so globalThis.fetch is monkey-patched,
+  // same pattern worker/test/index.test.js already uses for its /checkout and /portal-link tests.
+  const photoParams = {
+    From: '+15551234567', To: '+15559876543', Body: '', NumMedia: '1',
+    MediaUrl0: 'https://api.twilio.com/media/ME123', MediaContentType0: 'image/jpeg',
+  };
+  const photoSig = computeTwilioSignature(smsUrl, photoParams, authToken);
+  const photoBucket = createFakeR2Bucket();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, body: { fake: 'twilio-media-stream' } });
+  try {
+    request = new Request(smsUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': photoSig },
+      body: new URLSearchParams(photoParams).toString(),
+    });
+    response = await workerModule.fetch(request, baseEnv(createFakeImagesBinding(new ArrayBuffer(8)), photoBucket));
+    assert(response.status === 200, 'a validly signed photo message should return 200 through the real route');
+    assert(photoBucket._store.size === 1, 'a message with a photo must store exactly one object to R2 through the real route');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  console.log('PASS: index.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/handlers.test.js`
+Expected: fails with a module-not-found error for `../src/handlers.js`.
+
+Run: `node expense-intake/test/index.test.js`
+Expected: fails — the new assertions expect routes that don't exist yet (POST /sms currently 404s).
+
+- [x] **Step 3: Write `src/handlers.js`**
+
+```js
+// expense-intake/src/handlers.js
+import { parseFormBody, verifyTwilioSignature, extractWebhookFields } from './twilio.js';
+import { generateReceiptKey, storeReceiptPhoto } from './receipt-storage.js';
+
+export async function handleSmsWebhook({ url, bodyText, signature, accountSid, authToken, imagesBinding, bucket, fetchImpl }) {
+  const params = parseFormBody(bodyText);
+  const valid = await verifyTwilioSignature({ url, params, signature, authToken });
+  if (!valid) {
+    return { status: 403, contentType: 'text/plain', body: 'Forbidden' };
+  }
+
+  const fields = extractWebhookFields(params);
+  if (fields.media.length > 0) {
+    const key = generateReceiptKey(fields.to);
+    try {
+      await storeReceiptPhoto({
+        mediaUrl: fields.media[0].url,
+        accountSid,
+        authToken,
+        imagesBinding,
+        bucket,
+        key,
+        fetchImpl,
+      });
+    } catch (err) {
+      // Twilio retries webhook delivery on a non-2xx response — surfacing this as a
+      // failure (rather than swallowing it and returning 200) gives the photo another
+      // chance to be stored instead of being silently lost, per the spec's stated
+      // reason for storing before parsing.
+      console.error('Failed to store receipt photo', { error: err.message });
+      return { status: 500, contentType: 'text/plain', body: 'Failed to store photo' };
+    }
+  }
+
+  return { status: 200, contentType: 'text/xml', body: '<Response></Response>' };
+}
+```
+
+- [x] **Step 4: Update `src/index.js`**
+
+```js
+// expense-intake/src/index.js — full replacement
+import { handleSmsWebhook } from './handlers.js';
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (request.method === 'POST' && url.pathname === '/sms') {
+      const bodyText = await request.text();
+      const signature = request.headers.get('X-Twilio-Signature') || '';
+      const result = await handleSmsWebhook({
+        url: request.url,
+        bodyText,
+        signature,
+        accountSid: env.TWILIO_ACCOUNT_SID,
+        authToken: env.TWILIO_AUTH_TOKEN,
+        imagesBinding: env.IMAGES,
+        bucket: env.RECEIPTS_BUCKET,
+      });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    return new Response(JSON.stringify({ error: 'not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+};
+```
+
+- [x] **Step 5: Wire the new tests into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 6: Run tests to verify they pass**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all nine test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 7: Add the R2 and Images bindings to `wrangler.toml`**
+
+```toml
+# expense-intake/wrangler.toml — add these two blocks (keep everything already there)
+
+[[r2_buckets]]
+binding = "RECEIPTS_BUCKET"
+bucket_name = "expense-intake-receipts"
+
+[images]
+binding = "IMAGES"
+```
+
+- [x] **Step 8: Update the README — new setup steps, Status section, and route**
+
+```markdown
+// expense-intake/README.md — add a "## Routes" section after the intro paragraph,
+// replace "## Status", and add a new section after "## AI provider secrets"
+
+## Routes
+
+- `POST /sms` — Twilio inbound SMS/MMS webhook. Validates `X-Twilio-Signature`,
+  stores any attached photo (resized/recompressed) to R2, and responds with
+  TwiML. Parsing, categorization, and confirmation SMS content are Build
+  Order step 4 — this route currently stores photos and acknowledges
+  text-only messages without doing anything else with them yet.
+
+## Status
+
+Build Order steps 1-3: repo scaffolding, `wrangler.toml`, the D1 schema
+migration, the provider abstraction (`src/providers/`, unit-tested
+standalone, not yet wired into any route), and the Twilio inbound webhook
+(`POST /sms`) with signature verification and R2 photo storage. No parsing,
+categorization, Sheets writes, or confirmation SMS content yet — those are
+Build Order step 4.
+
+## R2 bucket and Cloudflare Images setup (one-time, per environment)
+
+\`\`\`bash
+npx wrangler r2 bucket create expense-intake-receipts
+\`\`\`
+
+Cloudflare Images must also be enabled on the account (Dashboard → Images →
+Enable) before the `[images]` binding in `wrangler.toml` will work. The free
+tier covers 5,000 transformations/month, which this project's expected
+volume is well under. **There is no local emulation for the Images
+binding** — `npx wrangler dev --remote` is required to exercise the real
+resize/recompress behavior; the plain-Node test suite only verifies the
+wrapper logic around it (see `test/fake-images.js`).
+
+## Twilio secrets (one-time, per environment)
+
+\`\`\`bash
+npx wrangler secret put TWILIO_ACCOUNT_SID
+npx wrangler secret put TWILIO_AUTH_TOKEN
+\`\`\`
+
+Once a Twilio phone number is provisioned (Build Order step 9's onboarding
+CLI script), point its messaging webhook at
+\`https://<this Worker's deployed URL>/sms\` — the exact URL configured in
+the Twilio console must match what's used to compute
+\`X-Twilio-Signature\` in \`src/twilio.js\`, or every inbound message will
+be rejected with 403.
+```
+
+- [x] **Step 9: Stage the change**
+
+```bash
+git add expense-intake/src/handlers.js expense-intake/test/handlers.test.js expense-intake/src/index.js expense-intake/test/index.test.js expense-intake/test/run-all.js expense-intake/wrangler.toml expense-intake/README.md
+```
+
+---
+
+## Self-Review — Step 3
+
+**Spec coverage for Step 3:** MESSAGE FLOW step 1 ("Client texts photo or free text") → the `/sms` route accepts both. MESSAGE FLOW step 2 ("Resize/compress the image, then store it in R2 immediately — Twilio media URLs expire fast. If this step fails, the photo is lost, so it happens before parsing") → Task 8's `storeReceiptPhoto` (resize/recompress happens as part of the same pipeline that fetches from Twilio and writes to R2, no parsing call anywhere in this step) and Task 9's `handleSmsWebhook` (storage happens, and only completes, before any response is sent — a storage failure surfaces as 500 rather than a false-positive 200). IMAGE PREPROCESSING section ("Resize so the longest side is capped at 1568px... Re-encode as JPEG at ~85% quality... before it's written to R2") → Task 8, `width: 1568, height: 1568, fit: 'scale-down'` + `format: 'image/jpeg', quality: 85`, matching the spec's numbers exactly. SECRETS section (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`) → both now used, for signature verification (Task 7) and Basic Auth on the media fetch (Task 8).
+
+**Not yet in scope, intentionally (Build Order step 4):** parsing (`parseExpense` isn't called anywhere in this step), client/house resolution via D1, categorization, Google Sheets writes, and real confirmation SMS content (the current `<Response></Response>` is an intentionally empty acknowledgment, not the spec's confirmation copy). The Design decisions note above explains the R2 key scheme choice (`To` number, not `client_id`) that keeps this step decoupled from D1.
+
+**Placeholder scan:** No TBD/TODO markers. `expense-intake-receipts` as the R2 bucket name is a real, final value (not a placeholder needing replacement), matching how `worker/wrangler.toml` names its own resources directly rather than with a placeholder.
+
+**Type consistency:** `handleSmsWebhook`'s return shape (`{status, contentType, body}`) is a new shape distinct from `worker/`'s `{status, body}` JSON-only convention — necessary because this route returns TwiML/XML and plain text, not JSON; `src/index.js`'s route handler consumes exactly this shape. `fields.media[]` entries (`{url, contentType}`) from Task 7's `extractWebhookFields` are consumed identically in Task 9's `handleSmsWebhook` (`fields.media[0].url`) and match what Task 8's `storeReceiptPhoto` expects as `mediaUrl`. The `imagesBinding`/`bucket` parameter names are identical across Task 8's `storeReceiptPhoto`, Task 9's `handleSmsWebhook`, and `src/index.js`'s `env.IMAGES`/`env.RECEIPTS_BUCKET` wiring — no renaming across the chain.
+
+**Known limitation flagged for the project owner, not silently glossed over:** because the Images binding has no local emulation, this step's automated tests (all of which run via plain `node`, zero dependencies) cannot verify that the *real* Cloudflare-side resize/recompress actually produces a correctly-sized, correctly-compressed JPEG — only that the Worker code calls the binding with the right parameters. Confirming the real behavior requires the project owner to run `wrangler dev --remote` (or deploy) with Images enabled and a Twilio number actually pointed at `/sms`, which is described in the README but can't be executed from an agent's local session.
