@@ -20,7 +20,7 @@ binding = "IMAGES"
 
 [[kv_namespaces]]
 binding = "CONVERSATION_STATE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "a0e34af4cb9245d7bf906256e49c5db5"
 
 # CONVERSATION_STATE (above) is also used by Build Order step 5 for house-selection
 # pending state and the 10-minute correction window — one namespace, multiple key
