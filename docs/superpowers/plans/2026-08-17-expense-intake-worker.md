@@ -6121,3 +6121,935 @@ git add expense-intake/README.md
 **Placeholder scan:** No TBD/TODO markers. No new secrets or bindings were introduced this step (the design spec's KV state reuses the `CONVERSATION_STATE` namespace Step 4 already provisioned with a real id), so there's nothing new for the project owner to fill in beyond running the two new commands (Task 22's migration apply, already-existing KV/D1 setup).
 
 **Type consistency:** `matchHouseFromReply({ text, houses }, env, deps) -> { houseId }` is called with the exact same shape by `handleAwaitingHouseReply` and `tryApplyCorrection` in Task 26, and its four-file provider-abstraction shape (`shared.js`/`openrouter.js`/`anthropic.js`/`index.js`) matches `parseExpense`'s established pattern from Step 2 exactly — same `{ apiKey, ..., fetchImpl }` adapter signature, same `env.AI_PROVIDER === 'anthropic'` dispatch rule. `awaiting_house` state (`{ pendingReviewId, attempt }`) and `correction` state (`{ expenseId, houseId, spreadsheetId, sheetRow }`) are written and read with identical shapes across `conversation-state.js` (Task 24), `fileExpense`/`handleAwaitingHouseReply`/`tryApplyCorrection` (Task 26). `insertExpense`'s and `insertPendingReview`'s new `id`-returning behavior (Task 22) is relied on consistently by `fileExpense` (`expenseId`) and the ambiguous-house branch (`pendingReviewId`) in Task 26 — no call site still expects the old raw `.run()` result. `extractAppendedRowNumber`/`deleteSheetRow` (Task 23) are called with the same parameter names in both `fileExpense` and `tryApplyCorrection`.
+
+---
+
+## Step 6: Pending review queue + pending retrieval
+
+**Design spec:** `docs/superpowers/specs/2026-08-18-expense-intake-pending-queue-design.md` (approved by the project owner). This step builds the `"pending"` command that Step 2's already-shipped `monthly_nudge` SMS copy refers to ("Text 'pending' to review") — a client-initiated walkthrough of their `pending_review` items.
+
+**Interface (from the design spec):** an inbound message whose trimmed, lowercased body is exactly `"pending"` starts a queue walkthrough: fetch the oldest `pending_review` row for the client, store a `pending_queue:<phone>` KV cursor, and reply with a prompt (guessed amount/category/date + instructions). While that cursor exists, the next reply is interpreted as `"skip"`, `"delete"`, or a house-name match (via Step 5's `matchHouseFromReply`) — each of which resolves/advances the cursor and, for skip/delete, auto-chains into showing the next item (or an "all caught up" message) in the same reply.
+
+**Design decisions locked in for this step:**
+- The `"pending"` keyword check happens before Step 5's `awaiting_house`/`correction` checks in `processExpenseMessage` — texting `"pending"` always starts a fresh walkthrough, even mid an unrelated Step 5 flow. Neither of those states is explicitly cleared by this; they simply expire on their own 10-minute TTLs if left unanswered, same as if the client had gone silent instead.
+- The `pending_queue:<phone>` cursor check is placed immediately after the keyword check, before `awaiting_house`/`correction` — so a queue-session reply (`"skip"`, `"delete"`, a house name) also takes priority over those Step 5 states. This is a narrow, real-world-rare overlap (a client would need an active Step 5 window *and* an active pending-queue session on the same phone at once); the chosen behavior keeps each state's fallthrough scoped to "become a normal new message" rather than "become a different special state's business."
+- An unrecognized reply while a `pending_queue` cursor is active (not `"skip"`/`"delete"`/a house match) leaves the cursor untouched and falls straight through to normal new-expense processing — no retry-then-give-up loop like Step 5's house-selection. This is a client-initiated, on-demand session, not a system-initiated prompt where a bounded number of attempts matters; the client can always just text `"pending"` again.
+- A successful house-match resolution **clears** the `pending_queue` cursor (in addition to deleting the resolved row) rather than leaving it pointed at a now-deleted id — an implementation necessity the design spec's "no chaining after resolution" decision implies but doesn't spell out: without clearing it, the next reply (if not `"pending"`) would hit `handlePendingQueueReply` with a stale `pendingReviewId`, and `findPendingReviewById` would return `null` for a row that no longer exists.
+- `"pending"` always fetches the **oldest** item, ignoring any existing cursor — a fresh command restarts from the beginning, so a previously-skipped item resurfaces on a later pass. `"skip"`/`"delete"`/resolution all advance from the *current* cursor (`id > ?`), not from the oldest again.
+- Filing a queued item reuses `fileExpense` exactly as Step 5's house-selection resolution does — the item's `amount_guess`/`category_guess` (`|| 'Other'`)/`confidence`/`raw_text`/`photo_r2_key` become the `parsed` input, uniformly regardless of whether the item already had a `house_id` set. `fileExpense` opening a fresh 10-minute correction window for the newly-filed expense is inherited automatically, not special-cased here.
+
+### Task 28: D1 query helpers — oldest/next pending review for a client
+
+**Files:**
+- Modify: `expense-intake/src/db.js`
+- Modify: `expense-intake/test/db.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/db.test.js`, immediately before `console.log('PASS: db.test.js');`, and add `findOldestPendingReviewForClient, findNextPendingReviewForClient` to the existing import from `'../src/db.js'`:
+
+```js
+  // findOldestPendingReviewForClient
+  const oldestPending = { id: 50, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.6 };
+  const db13 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': oldestPending });
+  const foundOldest = await findOldestPendingReviewForClient(db13, 1);
+  assert(foundOldest === oldestPending, 'findOldestPendingReviewForClient must return the row from the fake DB');
+  assert(db13.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
+
+  // findOldestPendingReviewForClient: none found
+  const db14 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': null });
+  const noOldest = await findOldestPendingReviewForClient(db14, 999);
+  assert(noOldest === null, 'findOldestPendingReviewForClient must return null when the client has no pending items');
+
+  // findNextPendingReviewForClient
+  const nextPending = { id: 51, client_id: 1, house_id: 10, amount_guess: 42, category_guess: 'Materials', photo_r2_key: null, raw_text: 'HD $42', confidence: 0.5 };
+  const db15 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': nextPending });
+  const foundNext = await findNextPendingReviewForClient(db15, 1, 50);
+  assert(foundNext === nextPending, 'findNextPendingReviewForClient must return the row from the fake DB');
+  assert(db15.calls[0].params[0] === 1 && db15.calls[0].params[1] === 50, 'must bind clientId then afterId, in that order');
+
+  // findNextPendingReviewForClient: none found (was the last item)
+  const db16 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': null });
+  const noNext = await findNextPendingReviewForClient(db16, 1, 999);
+  assert(noNext === null, 'findNextPendingReviewForClient must return null when there is no item after the cursor');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/db.test.js`
+Expected: fails — `findOldestPendingReviewForClient`/`findNextPendingReviewForClient` are not yet exported from `../src/db.js`.
+
+- [ ] **Step 3: Add the query helpers**
+
+Append to `expense-intake/src/db.js`:
+
+```js
+
+export async function findOldestPendingReviewForClient(db, clientId) {
+  return db.prepare('SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1').bind(clientId).first();
+}
+
+export async function findNextPendingReviewForClient(db, clientId, afterId) {
+  return db.prepare('SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1').bind(clientId, afterId).first();
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/db.test.js`
+Expected: `PASS: db.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/db.js expense-intake/test/db.test.js
+```
+
+---
+
+### Task 29: New SMS copy anchors — pending item prompt, pending empty
+
+**Files:**
+- Modify: `expense-intake/src/providers/shared.js`
+- Modify: `expense-intake/test/providers/shared.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/providers/shared.test.js`, immediately after the `SMS_COPY_ANCHORS.correction_confirmed` assertion added in Step 5:
+
+```js
+  assert(SMS_COPY_ANCHORS.pending_item_prompt.length === 2, 'pending_item_prompt must have 2 tone anchors');
+  assert(SMS_COPY_ANCHORS.pending_empty.length === 2, 'pending_empty must have 2 tone anchors');
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: providers/shared.test.js');`:
+
+```js
+  // buildSmsCopyPrompt must work for the two new Step 6 types too
+  const pendingItemPrompt = buildSmsCopyPrompt('pending_item_prompt', { amount: '10.00', category: 'Materials', date: '2026-08-12' });
+  assert(pendingItemPrompt.user.includes('amount: 10.00') && pendingItemPrompt.user.includes('date: 2026-08-12'), 'pending_item_prompt must carry the actual amount/date values');
+  const pendingEmptyPrompt = buildSmsCopyPrompt('pending_empty', {});
+  assert(pendingEmptyPrompt.system.includes('caught up') || pendingEmptyPrompt.system.includes('clear'), 'pending_empty prompt must include its tone anchors');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: fails — `SMS_COPY_ANCHORS.pending_item_prompt` (and `pending_empty`) are `undefined`.
+
+- [ ] **Step 3: Add the new anchors**
+
+In `expense-intake/src/providers/shared.js`, add two keys to `SMS_COPY_ANCHORS`, immediately after `correction_confirmed`:
+
+```js
+  pending_item_prompt: [
+    'Pending: $[amount] guessed [category] from [date]. Reply with the house name to file it, "skip" for the next one, or "delete" to discard.',
+    '$[amount], [category], logged [date] — still pending. House name to file, "skip" to move on, "delete" to remove.',
+  ],
+  pending_empty: [
+    "You're all caught up — no pending items to review.",
+    'Nothing pending right now — all clear.',
+  ],
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: `PASS: providers/shared.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
+```
+
+---
+
+### Task 30: Conversation-state — `pending_queue` KV helpers
+
+**Files:**
+- Modify: `expense-intake/src/conversation-state.js`
+- Modify: `expense-intake/test/conversation-state.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/conversation-state.test.js`, immediately before `console.log('PASS: conversation-state.test.js');`, and add `getPendingQueueState, setPendingQueueState, clearPendingQueueState` to the existing import from `'../src/conversation-state.js'`:
+
+```js
+  // pending_queue: not set
+  const kv8 = createFakeKV();
+  const missingQueue = await getPendingQueueState(kv8, '+15551234567');
+  assert(missingQueue === null, 'getPendingQueueState must return null when nothing is stored for this phone');
+
+  // pending_queue: set then get, with a 24-hour TTL
+  const kv9 = createFakeKV();
+  await setPendingQueueState(kv9, '+15551234567', { pendingReviewId: 50 });
+  const queuePutCall = kv9.calls.find((c) => c.method === 'put');
+  assert(queuePutCall.key === 'pending_queue:+15551234567', 'setPendingQueueState must key by pending_queue:<phone>');
+  assert(queuePutCall.options.expirationTtl === 86400, 'setPendingQueueState must use a 24-hour (86400s) TTL — an on-demand session, not a time-critical window like awaiting_house/correction');
+  const queueState = await getPendingQueueState(kv9, '+15551234567');
+  assert(queueState.pendingReviewId === 50, 'getPendingQueueState must return the exact stored state, JSON round-tripped');
+
+  // pending_queue: setting again for the same phone overwrites (advancing the cursor)
+  const kv10 = createFakeKV();
+  await setPendingQueueState(kv10, '+15551234567', { pendingReviewId: 50 });
+  await setPendingQueueState(kv10, '+15551234567', { pendingReviewId: 51 });
+  const advanced = await getPendingQueueState(kv10, '+15551234567');
+  assert(advanced.pendingReviewId === 51, 'a second setPendingQueueState call for the same phone must overwrite the first (advancing the cursor)');
+
+  // pending_queue: clear
+  const kv11 = createFakeKV();
+  await setPendingQueueState(kv11, '+15551234567', { pendingReviewId: 50 });
+  await clearPendingQueueState(kv11, '+15551234567');
+  assert((await getPendingQueueState(kv11, '+15551234567')) === null, 'clearPendingQueueState must delete the stored state');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/conversation-state.test.js`
+Expected: fails — `getPendingQueueState`/`setPendingQueueState`/`clearPendingQueueState` are not yet exported from `../src/conversation-state.js`.
+
+- [ ] **Step 3: Add the new helpers**
+
+In `expense-intake/src/conversation-state.js`, add a second TTL constant and the three new functions:
+
+```js
+// expense-intake/src/conversation-state.js — add near the top, alongside STATE_TTL_SECONDS
+const PENDING_QUEUE_TTL_SECONDS = 24 * 60 * 60; // an on-demand session, not a time-critical window — see Step 6's design spec
+```
+
+Append at the bottom of the file:
+
+```js
+
+export async function getPendingQueueState(kv, phone) {
+  const value = await kv.get(`pending_queue:${phone}`, { type: 'json' });
+  return value ?? null;
+}
+
+export async function setPendingQueueState(kv, phone, state) {
+  await kv.put(`pending_queue:${phone}`, JSON.stringify(state), { expirationTtl: PENDING_QUEUE_TTL_SECONDS });
+}
+
+export async function clearPendingQueueState(kv, phone) {
+  await kv.delete(`pending_queue:${phone}`);
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/conversation-state.test.js`
+Expected: `PASS: conversation-state.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/conversation-state.js expense-intake/test/conversation-state.test.js
+```
+
+---
+
+### Task 31: Wire the `"pending"` command and queue logic into `expense-flow.js`
+
+**Files:**
+- Modify: `expense-intake/src/expense-flow.js` (full replacement)
+- Modify: `expense-intake/test/expense-flow.test.js` (append new scenarios)
+
+- [ ] **Step 1: Write the failing tests**
+
+Add `findOldestPendingReviewForClient, findNextPendingReviewForClient` to the existing `'../src/fake-d1.js'`... (no — these come from `'../src/db.js'`, which `expense-flow.test.js` doesn't import directly; no import change needed there since the test only calls `processExpenseMessage`). Insert these scenarios into `main()` of `expense-intake/test/expense-flow.test.js`, immediately before `console.log('PASS: expense-flow.test.js');`:
+
+```js
+  // 18. "pending" with no pending items replies with the empty message, no queue state set
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': null,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: "You're all caught up." })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'pending', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"pending" with nothing pending must still produce a reply');
+    assert((await kv.get('pending_queue:+15551234567')) === null, 'no queue state should be set when there is nothing pending');
+  }
+
+  // 19. "pending" (case/whitespace-insensitive) with an item shows its prompt and sets the cursor
+  {
+    const pendingItem = { id: 50, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.6, created_at: '2026-08-12T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': pendingItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $10.00 guessed Materials from 2026-08-12.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '  PENDING  ', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"pending" with an item must reply with its prompt');
+    const state = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(state && state.pendingReviewId === 50, '"PENDING" (any case/whitespace) must set the queue cursor to the oldest item');
+  }
+
+  // 20. "skip" advances the cursor to the next item and shows its prompt
+  {
+    const nextItem = { id: 51, client_id: 1, house_id: 10, amount_guess: 42, category_guess: 'Materials', photo_r2_key: null, raw_text: 'HD $42', confidence: 0.5, created_at: '2026-08-14T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': nextItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $42.00 guessed Materials from 2026-08-14.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'skip', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"skip" must reply with the next item\'s prompt');
+    const state = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(state && state.pendingReviewId === 51, '"skip" must advance the cursor to the next item after the current one');
+  }
+
+  // 21. "skip" past the last item clears the cursor and replies with the empty message
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': null,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 51 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: "You're all caught up." })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'skip', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'skipping the last item must still produce a reply');
+    assert((await kv.get('pending_queue:+15551234567')) === null, 'the queue cursor must be cleared once there is nothing left to show');
+  }
+
+  // 22. "delete" removes the current item and advances (chains) to the next one
+  {
+    const nextItem = { id: 51, client_id: 1, house_id: 10, amount_guess: 42, category_guess: 'Materials', photo_r2_key: null, raw_text: 'HD $42', confidence: 0.5, created_at: '2026-08-14T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': nextItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $42.00 guessed Materials from 2026-08-14.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'delete', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"delete" must chain into the next item\'s prompt');
+    const deleteCall = db.calls.find((c) => c.sql.includes('DELETE FROM pending_review'));
+    assert(deleteCall && deleteCall.params[0] === 50, '"delete" must delete the current (cursor) item, not the next one');
+    const state = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(state && state.pendingReviewId === 51, '"delete" must advance the cursor to the next item after the deleted one');
+  }
+
+  // 23. A house-name match resolves the current item: files it, deletes it, clears the
+  // queue cursor (no chaining), and replies with just the filing confirmation.
+  {
+    const pendingItem = { id: 50, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.6, created_at: '2026-08-12T00:00:00.000Z' };
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+      'SELECT * FROM pending_review WHERE id = ?': pendingItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":11}', copy: 'Logged: $10.00, Materials, 456 Oak Ave.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '456 Oak', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a resolved queued item must produce a confirmation SMS body');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert && expenseInsert.params[0] === 11, 'the resolved item must be filed under the matched house');
+    const pendingDelete = db.calls.find((c) => c.sql.includes('DELETE FROM pending_review'));
+    assert(pendingDelete && pendingDelete.params[0] === 50, 'the resolved pending_review row must be deleted');
+    assert((await kv.get('pending_queue:+15551234567')) === null, 'resolving an item must clear the queue cursor rather than chaining to the next item');
+  }
+
+  // 24. An unrecognized reply while a queue cursor is active leaves it untouched and falls
+  // through to normal new-expense processing.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":null}', parse: JSON.stringify({ vendor: 'Lowes', amount: 8, category: 'Materials', confidence: 0.9, raw_text: 'Lowes $8' }), copy: 'Logged: $8.00, Materials, Main St.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $8 for screws', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'an unrecognized queue reply must still produce a normal SMS body from the fallthrough processing');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'an unrecognized queue reply must be processed as a new expense (high confidence, single house)');
+  }
+
+  // 25. "pending" overrides an active awaiting_house window from Step 5 (checked first)
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const pendingItem = { id: 60, client_id: 1, house_id: null, amount_guess: 5, category_guess: 'Other', photo_r2_key: null, raw_text: 'x', confidence: 0.3, created_at: '2026-08-15T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+      'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': pendingItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'awaiting_house:+15551234567': JSON.stringify({ pendingReviewId: 77, attempt: 0 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $5.00 guessed Other from 2026-08-15.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'pending', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"pending" must produce the queue prompt even with an active awaiting_house window');
+    const queueState = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(queueState && queueState.pendingReviewId === 60, '"pending" must set the queue cursor regardless of the pre-existing awaiting_house state');
+    const awaitingState = await kv.get('awaiting_house:+15551234567', { type: 'json' });
+    assert(awaitingState && awaitingState.pendingReviewId === 77, 'the awaiting_house state must be left untouched, not explicitly cleared, by starting a pending walkthrough');
+  }
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/expense-flow.test.js`
+Expected: fails — the current `processExpenseMessage` has no `"pending"`/queue handling at all, so scenarios 18-25 fail (e.g. `"pending"` gets parsed as a normal expense message instead of triggering the queue).
+
+- [ ] **Step 3: Rewrite `src/expense-flow.js`**
+
+Replace `expense-intake/src/expense-flow.js` in full:
+
+```js
+// expense-intake/src/expense-flow.js
+import { parseExpense, generateSmsCopy, matchHouseFromReply } from './providers/index.js';
+import {
+  findClientByTwilioNumber, findAuthorizedSender, findHousesForClient,
+  insertExpense, insertPendingReview, findPendingReviewById, deletePendingReview,
+  findExpenseById, updateExpenseHouse,
+  findOldestPendingReviewForClient, findNextPendingReviewForClient,
+} from './db.js';
+import { getGoogleAccessToken } from './google-auth.js';
+import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow } from './sheets.js';
+import {
+  getAwaitingHouse, setAwaitingHouse, clearAwaitingHouse,
+  getCorrectionState, setCorrectionState, clearCorrectionState,
+  getPendingQueueState, setPendingQueueState, clearPendingQueueState,
+} from './conversation-state.js';
+
+const CONFIDENCE_THRESHOLD = 0.7; // tunable — see Step 4's Design decisions note in the plan
+const PENDING_REVIEW_TTL_DAYS = 60; // matches spec's 60-day auto-purge (Cron Trigger is Build Order step 7)
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function pendingReviewExpiresAt() {
+  return new Date(Date.now() + PENDING_REVIEW_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function receiptPhotoUrl(baseUrl, photoR2Key) {
+  return `${baseUrl}/receipts/${encodeURIComponent(photoR2Key)}`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function loadStoredPhotoAsImageInput(bucket, photoR2Key) {
+  const object = await bucket.get(photoR2Key);
+  if (!object) {
+    throw new Error(`Stored receipt photo not found in R2: ${photoR2Key}`);
+  }
+  const bytes = await object.arrayBuffer();
+  return { base64: arrayBufferToBase64(bytes), mediaType: 'image/jpeg' };
+}
+
+function houseLabel(house) {
+  return house.nickname || house.address;
+}
+
+function pendingItemVars(item) {
+  return {
+    amount: item.amount_guess != null ? item.amount_guess.toFixed(2) : '0.00',
+    category: item.category_guess || 'Uncategorized',
+    date: item.created_at ? item.created_at.slice(0, 10) : '',
+  };
+}
+
+// Static fallback copy, used only if the AI copy-generation call itself fails. Deliberately
+// NOT the raw SMS_COPY_ANCHORS strings from providers/shared.js (Step 2) — those contain
+// literal bracket placeholders like "[amount]" meant only as few-shot prompt examples, never
+// meant to be sent to a client verbatim. These fallbacks substitute the real values instead.
+const FALLBACK_SMS_COPY = {
+  confirmation: (vars) => `Logged: $${vars.amount}, ${vars.category}, ${vars.house}.`,
+  low_confidence: (vars) => `Logged this as ${vars.category} but wasn't fully sure — flagged it for you to double check.`,
+  house_selection: () => 'Which house is this for? Address or nickname works.',
+  house_selection_retry: (vars) => `Sorry, could you confirm — is this for ${vars.house_list}?`,
+  house_selection_giveup: () => 'No worries — saved this one for you to sort out later.',
+  correction_confirmed: (vars) => `Updated — moved to ${vars.house}.`,
+  pending_item_prompt: (vars) => `Pending: $${vars.amount}, ${vars.category}, ${vars.date}. Reply with the house name to file it, "skip" for the next one, or "delete" to discard.`,
+  pending_empty: () => "You're all caught up — no pending items to review.",
+};
+
+// A copy-generation failure must never re-trigger writes that already succeeded. By the
+// time this is called, the relevant write has already committed — if generateSmsCopy then
+// throws (rate limit, timeout, network blip, all realistic for an external API call) and
+// that exception were allowed to propagate, handleSmsWebhook's outer catch would turn it
+// into a 500, Twilio would retry the whole webhook, and — since nothing gets cached on a 500
+// (Task 16) — the retry would reprocess from scratch. Falling back to static copy instead
+// means the pipeline always finishes, gets cached, and Twilio never retries a message whose
+// writes already succeeded.
+async function safeGenerateSmsCopy(type, vars, env, deps) {
+  try {
+    return await generateSmsCopy(type, vars, env, deps);
+  } catch (err) {
+    console.error('generateSmsCopy failed, using fallback copy', { error: err.message, type });
+    // Defensive: FALLBACK_SMS_COPY only covers the types this module currently calls with.
+    // If a future call site invokes this with a type that hasn't been given a fallback
+    // entry, FALLBACK_SMS_COPY[type] is undefined — calling it would throw a TypeError from
+    // inside this catch block itself. A generic last-resort string keeps the guarantee
+    // unconditional.
+    const fallback = FALLBACK_SMS_COPY[type];
+    return fallback ? fallback(vars) : 'We logged this — reply if something looks off.';
+  }
+}
+
+// Writes an already-parsed, already-house-resolved expense to the house's Sheet + the
+// expenses table, and opens the 10-minute correction window for it. Shared by the normal
+// high-confidence auto-file path, by a house-selection reply that resolves a pending item
+// (Step 5), and by resolving an item from the pending queue (Step 6) — all three need the
+// exact same write sequence.
+async function fileExpense({ house, parsed, fields, photoR2Key, env, deps }) {
+  if (!house.google_sheet_id) {
+    // A house with no Sheet set up is an onboarding gap, not a runtime parsing issue —
+    // surface it loudly (visible in wrangler tail) rather than silently losing the expense
+    // into pending_review, which would mask a real setup bug during manual (pre-step-9) onboarding.
+    throw new Error(`House ${house.id} has no google_sheet_id configured`);
+  }
+  const accessToken = await getGoogleAccessToken({ serviceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON, fetchImpl: deps.fetchImpl });
+  const photoUrl = photoR2Key ? receiptPhotoUrl(env.WORKER_BASE_URL, photoR2Key) : '';
+  const appendResponse = await appendExpenseRow({
+    accessToken,
+    spreadsheetId: house.google_sheet_id,
+    row: [todayIso(), parsed.vendor, parsed.amount, parsed.category, parsed.confidence, photoUrl, parsed.raw_text, fields.from, ''],
+    fetchImpl: deps.fetchImpl,
+  });
+  const sheetRow = extractAppendedRowNumber(appendResponse);
+  const expenseId = await insertExpense(env.DB, {
+    houseId: house.id,
+    date: todayIso(),
+    vendor: parsed.vendor,
+    amount: parsed.amount,
+    category: parsed.category,
+    confidence: parsed.confidence,
+    photoR2Key,
+    rawText: parsed.raw_text,
+    loggedByPhone: fields.from,
+    notes: '',
+    sheetRow,
+  });
+  await setCorrectionState(env.CONVERSATION_STATE, fields.from, {
+    expenseId,
+    houseId: house.id,
+    spreadsheetId: house.google_sheet_id,
+    sheetRow,
+  });
+  return safeGenerateSmsCopy('confirmation', {
+    amount: parsed.amount != null ? parsed.amount.toFixed(2) : '0.00',
+    category: parsed.category,
+    house: houseLabel(house),
+  }, env, deps);
+}
+
+// Resolves an in-flight house-selection prompt (Step 5, Feature 1). Always returns a
+// non-null SMS body — every branch here (match, retry, give-up) produces a reply.
+async function handleAwaitingHouseReply({ state, houses, fields, env, deps }) {
+  const { houseId } = await matchHouseFromReply({ text: fields.body, houses }, env, deps);
+
+  if (houseId != null) {
+    const house = houses.find((h) => h.id === houseId);
+    const pending = await findPendingReviewById(env.DB, state.pendingReviewId);
+    const parsed = {
+      vendor: null,
+      amount: pending.amount_guess,
+      category: pending.category_guess || 'Other',
+      confidence: pending.confidence,
+      raw_text: pending.raw_text,
+    };
+    const smsBody = await fileExpense({ house, parsed, fields, photoR2Key: pending.photo_r2_key, env, deps });
+    await deletePendingReview(env.DB, state.pendingReviewId);
+    await clearAwaitingHouse(env.CONVERSATION_STATE, fields.from);
+    return smsBody;
+  }
+
+  if (state.attempt === 0) {
+    await setAwaitingHouse(env.CONVERSATION_STATE, fields.from, { pendingReviewId: state.pendingReviewId, attempt: 1 });
+    const houseList = houses.map(houseLabel).join(' or ');
+    return safeGenerateSmsCopy('house_selection_retry', { house_list: houseList }, env, deps);
+  }
+
+  await clearAwaitingHouse(env.CONVERSATION_STATE, fields.from);
+  return safeGenerateSmsCopy('house_selection_giveup', {}, env, deps);
+}
+
+// Checks whether an inbound reply is a house correction for the most recently filed expense
+// (Step 5, Feature 2). Returns the SMS body to reply with if it is a correction, or `null` if
+// it isn't — a `null` return tells the caller to fall through to normal message processing,
+// and leaves the correction window's state untouched so it's still available for a later reply.
+async function tryApplyCorrection({ state, houses, fields, env, deps }) {
+  const { houseId } = await matchHouseFromReply({ text: fields.body, houses }, env, deps);
+  if (houseId == null) {
+    return null;
+  }
+
+  const newHouse = houses.find((h) => h.id === houseId);
+  if (!newHouse.google_sheet_id) {
+    throw new Error(`House ${newHouse.id} has no google_sheet_id configured`);
+  }
+  const expense = await findExpenseById(env.DB, state.expenseId);
+  const accessToken = await getGoogleAccessToken({ serviceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON, fetchImpl: deps.fetchImpl });
+
+  await deleteSheetRow({ accessToken, spreadsheetId: state.spreadsheetId, sheetRow: state.sheetRow, fetchImpl: deps.fetchImpl });
+
+  const photoUrl = expense.photo_r2_key ? receiptPhotoUrl(env.WORKER_BASE_URL, expense.photo_r2_key) : '';
+  const appendResponse = await appendExpenseRow({
+    accessToken,
+    spreadsheetId: newHouse.google_sheet_id,
+    row: [expense.date, expense.vendor, expense.amount, expense.category, expense.confidence, photoUrl, expense.raw_text, expense.logged_by_phone, expense.notes],
+    fetchImpl: deps.fetchImpl,
+  });
+  const newSheetRow = extractAppendedRowNumber(appendResponse);
+
+  await updateExpenseHouse(env.DB, { expenseId: state.expenseId, houseId: newHouse.id, sheetRow: newSheetRow });
+  await clearCorrectionState(env.CONVERSATION_STATE, fields.from);
+
+  return safeGenerateSmsCopy('correction_confirmed', { house: houseLabel(newHouse) }, env, deps);
+}
+
+// Shows a pending item's prompt and sets the queue cursor to it, or — if there is no item —
+// clears the cursor and replies with the "all caught up" message. Shared by the initial
+// "pending" command and by every skip/delete/resolution advance (Step 6).
+async function showPendingItemOrEmpty({ item, phone, env, deps }) {
+  if (!item) {
+    await clearPendingQueueState(env.CONVERSATION_STATE, phone);
+    return safeGenerateSmsCopy('pending_empty', {}, env, deps);
+  }
+  await setPendingQueueState(env.CONVERSATION_STATE, phone, { pendingReviewId: item.id });
+  return safeGenerateSmsCopy('pending_item_prompt', pendingItemVars(item), env, deps);
+}
+
+async function handlePendingCommand({ client, fields, env, deps }) {
+  const item = await findOldestPendingReviewForClient(env.DB, client.id);
+  return showPendingItemOrEmpty({ item, phone: fields.from, env, deps });
+}
+
+// Interprets a reply while a pending-queue cursor is active: "skip"/"delete" advance the
+// cursor (chaining into the next item's prompt, or the empty message), a house-name match
+// resolves the current item. Returns `null` if the reply is none of these, telling the
+// caller to fall through to normal message processing — the cursor is left untouched in
+// that case, still valid for a later reply.
+async function handlePendingQueueReply({ state, client, houses, fields, env, deps }) {
+  const normalized = fields.body.trim().toLowerCase();
+
+  if (normalized === 'skip') {
+    const next = await findNextPendingReviewForClient(env.DB, client.id, state.pendingReviewId);
+    return showPendingItemOrEmpty({ item: next, phone: fields.from, env, deps });
+  }
+
+  if (normalized === 'delete') {
+    await deletePendingReview(env.DB, state.pendingReviewId);
+    const next = await findNextPendingReviewForClient(env.DB, client.id, state.pendingReviewId);
+    return showPendingItemOrEmpty({ item: next, phone: fields.from, env, deps });
+  }
+
+  const { houseId } = await matchHouseFromReply({ text: fields.body, houses }, env, deps);
+  if (houseId == null) {
+    return null;
+  }
+
+  const house = houses.find((h) => h.id === houseId);
+  const pending = await findPendingReviewById(env.DB, state.pendingReviewId);
+  const parsed = {
+    vendor: null,
+    amount: pending.amount_guess,
+    category: pending.category_guess || 'Other',
+    confidence: pending.confidence,
+    raw_text: pending.raw_text,
+  };
+  const smsBody = await fileExpense({ house, parsed, fields, photoR2Key: pending.photo_r2_key, env, deps });
+  await deletePendingReview(env.DB, state.pendingReviewId);
+  // No chaining after a resolution (per the design spec) — but the cursor still must be
+  // cleared, not just left alone, since it now points at a row that no longer exists. Leaving
+  // it would make the client's *next* reply (if not "pending") hit this function again with a
+  // stale pendingReviewId, and findPendingReviewById would resolve to null.
+  await clearPendingQueueState(env.CONVERSATION_STATE, fields.from);
+  return smsBody;
+}
+
+export async function processExpenseMessage({ fields, photoR2Key, env, deps = {} }) {
+  if (!fields.body && !photoR2Key) {
+    return { smsBody: '' };
+  }
+
+  const client = await findClientByTwilioNumber(env.DB, fields.to);
+  if (!client) {
+    return { smsBody: '' };
+  }
+
+  const sender = await findAuthorizedSender(env.DB, client.id, fields.from);
+  if (!sender) {
+    return { smsBody: '' };
+  }
+
+  const houses = await findHousesForClient(env.DB, client.id);
+
+  // A reply's text is checked against the pending-review queue command/cursor, then any
+  // in-flight house-selection prompt or open correction window, before it's treated as a
+  // brand-new expense message. A photo-only message (no body text) has nothing to match
+  // against a house name or command keyword, so it always skips straight to normal
+  // processing — same as Step 4's existing empty-body-for-text handling.
+  if (fields.body) {
+    const normalizedBody = fields.body.trim().toLowerCase();
+
+    if (normalizedBody === 'pending') {
+      const smsBody = await handlePendingCommand({ client, fields, env, deps });
+      return { smsBody };
+    }
+
+    const pendingQueueState = await getPendingQueueState(env.CONVERSATION_STATE, fields.from);
+    if (pendingQueueState) {
+      const queueSmsBody = await handlePendingQueueReply({ state: pendingQueueState, client, houses, fields, env, deps });
+      if (queueSmsBody !== null) {
+        return { smsBody: queueSmsBody };
+      }
+      // Not a recognized queue action — fall through and process it as a new message below.
+    }
+
+    const awaitingHouse = await getAwaitingHouse(env.CONVERSATION_STATE, fields.from);
+    if (awaitingHouse) {
+      const smsBody = await handleAwaitingHouseReply({ state: awaitingHouse, houses, fields, env, deps });
+      return { smsBody };
+    }
+
+    const correctionState = await getCorrectionState(env.CONVERSATION_STATE, fields.from);
+    if (correctionState) {
+      const correctionSmsBody = await tryApplyCorrection({ state: correctionState, houses, fields, env, deps });
+      if (correctionSmsBody !== null) {
+        return { smsBody: correctionSmsBody };
+      }
+      // Not a correction after all — fall through and process it as a new message below.
+    }
+  }
+
+  const image = photoR2Key ? await loadStoredPhotoAsImageInput(env.RECEIPTS_BUCKET, photoR2Key) : null;
+
+  let parsed = null;
+  try {
+    parsed = await parseExpense({ text: fields.body || null, image }, env, deps);
+  } catch (err) {
+    console.error('parseExpense failed', { error: err.message });
+    parsed = null;
+  }
+
+  const houseIsAmbiguous = houses.length !== 1;
+
+  if (houseIsAmbiguous) {
+    const pendingReviewId = await insertPendingReview(env.DB, {
+      clientId: client.id,
+      houseId: null,
+      amountGuess: parsed ? parsed.amount : null,
+      categoryGuess: parsed ? parsed.category : null,
+      photoR2Key,
+      rawText: parsed ? parsed.raw_text : (fields.body || ''),
+      confidence: parsed ? parsed.confidence : 0,
+      expiresAt: pendingReviewExpiresAt(),
+    });
+    await setAwaitingHouse(env.CONVERSATION_STATE, fields.from, { pendingReviewId, attempt: 0 });
+    const smsBody = await safeGenerateSmsCopy('house_selection', {}, env, deps);
+    return { smsBody };
+  }
+
+  const house = houses[0];
+
+  if (parsed && parsed.confidence >= CONFIDENCE_THRESHOLD && parsed.amount != null) {
+    const smsBody = await fileExpense({ house, parsed, fields, photoR2Key, env, deps });
+    return { smsBody };
+  }
+
+  await insertPendingReview(env.DB, {
+    clientId: client.id,
+    houseId: house.id,
+    amountGuess: parsed ? parsed.amount : null,
+    categoryGuess: parsed ? parsed.category : null,
+    photoR2Key,
+    rawText: parsed ? parsed.raw_text : (fields.body || ''),
+    confidence: parsed ? parsed.confidence : 0,
+    expiresAt: pendingReviewExpiresAt(),
+  });
+  const smsBody = await safeGenerateSmsCopy('low_confidence', {
+    category: parsed ? parsed.category : 'Uncategorized',
+  }, env, deps);
+  return { smsBody };
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `node expense-intake/test/expense-flow.test.js`
+Expected: `PASS: expense-flow.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test.js
+```
+
+---
+
+### Task 32: Docs — README updates and Step 6 self-review
+
+**Files:**
+- Modify: `expense-intake/README.md`
+
+- [ ] **Step 1: Update the `## Routes` section**
+
+In `expense-intake/README.md`, add a new bullet to the `POST /sms` route's description in `## Routes`, immediately after the existing correction-window/house-selection bullet paragraph:
+
+```markdown
+
+  A client can also text `"pending"` at any time (this check runs before
+  the house-selection/correction checks above) to walk through their
+  `pending_review` items one at a time: reply with a house name to file
+  the current item, `"skip"` to see the next one, or `"delete"` to discard
+  it — `"skip"`/`"delete"` immediately show the next item (or an
+  "all caught up" message) in the same reply.
+```
+
+- [ ] **Step 2: Update the `## Status` section**
+
+Replace `## Status` in `expense-intake/README.md` with:
+
+```markdown
+## Status
+
+Build Order steps 1-6: repo scaffolding, D1 schema, the provider
+abstraction, the Twilio inbound webhook with R2 photo storage, the full
+happy-path pipeline (parse, categorize, file to Sheets/D1 or
+`pending_review`), Twilio-retry dedup protection, the interactive
+house-selection reply flow, the 10-minute post-confirmation correction
+window, and the client-initiated `"pending"` review queue. See
+`docs/superpowers/specs/2026-08-18-expense-intake-house-selection-correction-design.md`
+and
+`docs/superpowers/specs/2026-08-18-expense-intake-pending-queue-design.md`
+for those two steps' designs. Not yet built: Cron Triggers for the daily
+purge and monthly nudge (step 7), save-contact onboarding (step 8), and
+the onboarding CLI script (step 9) — houses currently need a
+`google_sheet_id` set via manual SQL before the pipeline can file to
+their Sheet.
+```
+
+- [ ] **Step 3: Run the full suite one more time**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 4: Stage the change**
+
+```bash
+git add expense-intake/README.md
+```
+
+---
+
+## Self-Review — Step 6
+
+**Spec coverage for Step 6:** The `"pending"` trigger and its priority over Step 5's states → Task 31's `processExpenseMessage` routing order, matching the design spec's "Trigger and priority" section exactly (keyword checked first, `pending_queue` cursor checked second, `awaiting_house`/`correction` unchanged after that). The queue cursor (`{ pendingReviewId }`, oldest-on-command / next-after-cursor-on-advance) → Task 28's two D1 helpers + Task 30's three KV helpers + Task 31's `handlePendingCommand`/`handlePendingQueueReply`. `"skip"`/`"delete"`/house-match actions and the chaining-vs-no-chaining distinction → Task 31's `handlePendingQueueReply` and `showPendingItemOrEmpty`, covering all three actions plus the "falls through, cursor untouched" no-match case. Filing a queued item via the shared `fileExpense` helper, uniformly regardless of whether the item already had a `house_id` → Task 31, reusing Step 5's `fileExpense` verbatim. The two new SMS copy types → Task 29.
+
+**Not yet in scope, intentionally (later Build Order steps):** the monthly nudge Cron Trigger that actually tells a client how many items are waiting (step 7) — the `"pending"` command built here works standalone and doesn't depend on it. Save-contact onboarding (step 8) and the onboarding CLI script (step 9, meaning `houses.google_sheet_id` must still be set by hand). Amount/category correction from within the queue remains out of scope, matching Step 5's "house only" correction philosophy.
+
+**Placeholder scan:** No TBD/TODO markers. No new secrets or bindings were introduced this step (reuses the existing `CONVERSATION_STATE` KV namespace and `DB` binding).
+
+**Type consistency:** `showPendingItemOrEmpty({ item, phone, env, deps })` is called identically by `handlePendingCommand` and both branches of `handlePendingQueueReply` in Task 31. `pending_queue` state (`{ pendingReviewId }`) is written/read/cleared with the same shape across `conversation-state.js` (Task 30) and every call site in `expense-flow.js` (Task 31) — no call site expects a richer shape (e.g. an item list) than what's actually stored. `findOldestPendingReviewForClient`/`findNextPendingReviewForClient` (Task 28) are called with the same argument order (`db, clientId[, afterId]`) in both their own tests and Task 31. The house-match resolution branch in `handlePendingQueueReply` mirrors Step 5's `handleAwaitingHouseReply` match branch line-for-line in how it builds `parsed` from a `pending_review` row — the same shape (`vendor: null`, `category: category_guess || 'Other'`, etc.) is used both places, so a future change to that mapping would need to stay in sync in exactly two spots, both now clearly cross-referenced in comments.
