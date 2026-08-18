@@ -7729,3 +7729,735 @@ git add expense-intake/src/index.js expense-intake/test/index.test.js expense-in
 **Placeholder scan:** No TBD/TODO markers. No new secrets were introduced — `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` already exist from Step 3 and are reused as-is for outbound sends. The two cron expressions in `wrangler.toml` are real, working schedules (not placeholders) with an explicit "tunable" callout in the design spec for their exact times.
 
 **Type consistency:** `sendSms({ accountSid, authToken, from, to, body, fetchImpl })`'s parameter names match the existing `fetchImpl`-injection convention used by every other outbound-fetch function in this codebase (`appendExpenseRow`, `anthropicMessagesRequest`, etc.). `purgeExpiredPendingReviews(env, deps)`/`sendMonthlyNudges(env, deps)` match the `(env, deps = {})` shape `processExpenseMessage` already established, even though neither currently uses every field of `deps` beyond `fetchImpl`. `findActiveClientsWithPendingCounts`'s result shape (`{ client_id, twilio_number, pending_count }`) is consumed with those exact three field names in `sendMonthlyNudges`, and its test's fixture data matches that shape exactly. `safeGenerateSmsCopy`'s export (Task 35) doesn't change its signature at all — every existing call site inside `expense-flow.js` continues to call it exactly as before, and `scheduled.js` (Task 36) calls it with the identical `(type, vars, env, deps)` argument order.
+
+---
+
+## Step 8: Save-contact onboarding
+
+**Design spec:** `docs/superpowers/specs/2026-08-18-expense-intake-save-contact-onboarding-design.md` (approved by the project owner). Sends a new authorized sender a tappable vCard the first time they text in, so their phone shows a friendly business name instead of a raw number on future texts. `authorized_senders.contact_card_sent_at` has existed since Step 1's schema with nothing writing to it — this step is what finally does.
+
+**Interface (from the design spec):** a new public route, `GET /contact-card/:clientId`, serves a generated `.vcf` file. On every inbound message, right after the sender is confirmed authorized, `processExpenseMessage` checks `sender.contact_card_sent_at`; if `null`, it sends an outbound MMS (Step 7's `sendSms`, extended with an optional `mediaUrl` param) pointing at that route, then marks `contact_card_sent_at`. The whole sequence is internally failure-proofed so it can never fail or block the sender's actual reply.
+
+**Design decisions locked in for this step:**
+- `GET /contact-card/:clientId` is public and unauthenticated, same trust model as `GET /receipts/:key` — but for a different reason: a vCard isn't sensitive data (just a business name and the client's own already-public Twilio number), so there's no unguessable-key requirement; a plain sequential `clientId` is fine.
+- The vCard-send is `await`ed inline (not threaded through `ctx.waitUntil`) but wrapped in its own try/catch — a failure is logged and `contact_card_sent_at` is left `null` (retried on the sender's next message), but never propagates to affect the main reply. This is a deliberate simplification over true background dispatch, called out explicitly in the design spec, since `ctx.waitUntil` would require plumbing `ctx` through every layer from `src/index.js`'s `fetch` handler down to `expense-flow.js` for a non-critical onboarding nicety.
+- `sendSms`'s `mediaUrl` parameter is optional — when omitted (every existing call site), behavior is byte-for-byte unchanged from Step 7; only `maybeSendContactCard`'s new call site supplies it.
+- The MMS body text goes through the same `safeGenerateSmsCopy` AI-with-fallback pattern as every other outbound message, via a new `contact_card_intro` copy type — not because wording variety matters for a one-time-per-sender message, but for architectural consistency (every outbound message in this project is generated the same way).
+
+### Task 38: D1 query helpers — `findClientById`, `markContactCardSent`
+
+**Files:**
+- Modify: `expense-intake/src/db.js`
+- Modify: `expense-intake/test/db.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Add `findClientById, markContactCardSent` to the existing import from `'../src/db.js'` in `expense-intake/test/db.test.js`. Insert this block into `main()`, immediately before `console.log('PASS: db.test.js');`:
+
+```js
+  // findClientById
+  const clientById = { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' };
+  const db20 = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': clientById });
+  const foundClientById = await findClientById(db20, 1);
+  assert(foundClientById === clientById, 'findClientById must return the row from the fake DB');
+  assert(db20.calls[0].params[0] === 1, 'must bind the client id as the query parameter');
+
+  // findClientById: not found
+  const db21 = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null });
+  const missingClientById = await findClientById(db21, 999);
+  assert(missingClientById === null, 'findClientById must return null when no client matches');
+
+  // markContactCardSent
+  const db22 = createFakeD1();
+  await markContactCardSent(db22, 5, '2026-08-18T12:00:00.000Z');
+  assert(db22.calls[0].sql.includes('UPDATE authorized_senders SET contact_card_sent_at'), 'markContactCardSent must UPDATE authorized_senders.contact_card_sent_at');
+  assert(
+    JSON.stringify(db22.calls[0].params) === JSON.stringify(['2026-08-18T12:00:00.000Z', 5]),
+    'markContactCardSent must bind the timestamp then the sender id, matching the SET ... WHERE id = ? clause order'
+  );
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/db.test.js`
+Expected: fails — `findClientById`/`markContactCardSent` are not yet exported from `../src/db.js`.
+
+- [ ] **Step 3: Add the query helpers**
+
+Append to `expense-intake/src/db.js`:
+
+```js
+
+export async function findClientById(db, id) {
+  return db.prepare('SELECT * FROM clients WHERE id = ?').bind(id).first();
+}
+
+export async function markContactCardSent(db, senderId, sentAtIso) {
+  return db.prepare('UPDATE authorized_senders SET contact_card_sent_at = ? WHERE id = ?').bind(sentAtIso, senderId).run();
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/db.test.js`
+Expected: `PASS: db.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/db.js expense-intake/test/db.test.js
+```
+
+---
+
+### Task 39: `src/vcard.js` — pure vCard builder
+
+**Files:**
+- Create: `expense-intake/src/vcard.js`
+- Create: `expense-intake/test/vcard.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [ ] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/vcard.test.js
+import { buildVCard } from '../src/vcard.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+async function main() {
+  const vcard = buildVCard({ businessName: 'Acme Rentals', phoneNumber: '+15559876543' });
+  assert(vcard.startsWith('BEGIN:VCARD\r\n'), 'vCard must start with the BEGIN:VCARD line, CRLF-terminated per spec');
+  assert(vcard.includes('VERSION:3.0\r\n'), 'vCard must declare VERSION:3.0');
+  assert(vcard.includes('FN:Acme Rentals Expense Tracker\r\n'), 'vCard must set the formatted name to the business name plus "Expense Tracker"');
+  assert(vcard.includes('TEL;TYPE=CELL:+15559876543\r\n'), "vCard must include the client's Twilio number as a cell TEL field");
+  assert(vcard.trim().endsWith('END:VCARD'), 'vCard must end with the END:VCARD line');
+
+  console.log('PASS: vcard.test.js');
+}
+
+await main();
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/vcard.test.js`
+Expected: fails with a module-not-found error for `../src/vcard.js` (it doesn't exist yet).
+
+- [ ] **Step 3: Write the module**
+
+```js
+// expense-intake/src/vcard.js
+export function buildVCard({ businessName, phoneNumber }) {
+  return [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `FN:${businessName} Expense Tracker`,
+    `TEL;TYPE=CELL:${phoneNumber}`,
+    'END:VCARD',
+  ].join('\r\n') + '\r\n';
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/vcard.test.js`
+Expected: `PASS: vcard.test.js`
+
+- [ ] **Step 5: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './migration-0002.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './vcard.test.js';
+import './expense-flow.test.js';
+import './message-dedup.test.js';
+import './conversation-state.test.js';
+import './scheduled.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [ ] **Step 6: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 7: Stage the change**
+
+```bash
+git add expense-intake/src/vcard.js expense-intake/test/vcard.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 40: New SMS copy anchor — `contact_card_intro`
+
+**Files:**
+- Modify: `expense-intake/src/providers/shared.js`
+- Modify: `expense-intake/test/providers/shared.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/providers/shared.test.js`, immediately after the `SMS_COPY_ANCHORS.pending_empty` assertion added in Step 6:
+
+```js
+  assert(SMS_COPY_ANCHORS.contact_card_intro.length === 2, 'contact_card_intro must have 2 tone anchors');
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: providers/shared.test.js');`:
+
+```js
+  // buildSmsCopyPrompt must work for the new Step 8 type too
+  const contactCardPrompt = buildSmsCopyPrompt('contact_card_intro', { business: 'Acme Rentals' });
+  assert(contactCardPrompt.user.includes('business: Acme Rentals'), 'contact_card_intro prompt must carry the actual business name');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: fails — `SMS_COPY_ANCHORS.contact_card_intro` is `undefined`.
+
+- [ ] **Step 3: Add the new anchor**
+
+In `expense-intake/src/providers/shared.js`, add one key to `SMS_COPY_ANCHORS`, immediately after `pending_empty`:
+
+```js
+  contact_card_intro: [
+    "Save this number for [business]'s expense tracker — text a receipt anytime.",
+    "This is [business]'s expense line — save the contact so texts are easy to spot.",
+  ],
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: `PASS: providers/shared.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
+```
+
+---
+
+### Task 41: `sendSms` — optional `mediaUrl` for MMS
+
+**Files:**
+- Modify: `expense-intake/src/twilio.js`
+- Modify: `expense-intake/test/twilio.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/twilio.test.js`, immediately after the existing `sendSms` error-path assertion, before `console.log('PASS: twilio.test.js');`:
+
+```js
+  // sendSms: optional mediaUrl turns the send into an MMS
+  const mmsFetch = fakeFetch(true, 201, { sid: 'SM456', status: 'queued' });
+  await sendSms({ accountSid: 'AC_test', authToken: 'test_auth_token', from: '+15559876543', to: '+15551234567', body: 'Save this contact', mediaUrl: 'https://expense-intake.example.com/contact-card/1', fetchImpl: mmsFetch });
+  const mmsBody = new URLSearchParams(mmsFetch.calls[0].init.body);
+  assert(mmsBody.get('MediaUrl') === 'https://expense-intake.example.com/contact-card/1', 'sendSms must include MediaUrl in the form body when provided');
+
+  // sendSms: mediaUrl omitted must not add a MediaUrl field at all (the earlier plain-SMS call above)
+  assert(sendBody.get('MediaUrl') === null, 'sendSms must not send a MediaUrl field for a plain SMS with no mediaUrl provided');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/twilio.test.js`
+Expected: fails — the current `sendSms` never adds a `MediaUrl` field, so `mmsBody.get('MediaUrl')` is `null` instead of the expected URL.
+
+- [ ] **Step 3: Add the parameter**
+
+Replace `sendSms` in `expense-intake/src/twilio.js`:
+
+```js
+// Twilio's outbound REST API — the first outbound-send capability this Worker has needed;
+// every reply built in earlier Build Order steps has been a synchronous TwiML response to
+// an inbound webhook, which a Cron Trigger has no inbound request to piggyback on. An
+// optional mediaUrl turns the send into an MMS (Step 8's vCard delivery) — Twilio's Messages
+// API treats SMS/MMS through the same endpoint, MediaUrl is just an optional form field.
+export async function sendSms({ accountSid, authToken, from, to, body, mediaUrl, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+  const params = { To: to, From: from, Body: body };
+  if (mediaUrl) {
+    params.MediaUrl = mediaUrl;
+  }
+  const response = await doFetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${basicAuth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams(params).toString(),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.message) || `Twilio send failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/twilio.test.js`
+Expected: `PASS: twilio.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js
+```
+
+---
+
+### Task 42: Wire `maybeSendContactCard` into `expense-flow.js`
+
+**Files:**
+- Modify: `expense-intake/src/expense-flow.js`
+- Modify: `expense-intake/test/expense-flow.test.js`
+
+- [ ] **Step 1: Write the failing tests**
+
+In `expense-intake/test/expense-flow.test.js`, make these three targeted changes:
+
+1. Add `TWILIO_ACCOUNT_SID: 'AC_test', TWILIO_AUTH_TOKEN: 'test_auth_token',` to the object returned by `baseEnv`, alongside the existing `WORKER_BASE_URL` line — `maybeSendContactCard`'s `sendSms` call needs these, and no existing scenario asserts on their absence.
+
+2. Change the shared `sender` fixture near the top of `main()`:
+
+```js
+  const sender = { id: 5, client_id: 1, phone_number: '+15551234567' };
+```
+
+to:
+
+```js
+  // contact_card_sent_at is set (already onboarded) so scenarios 1-25 below, all written
+  // before Step 8 existed, don't unexpectedly trigger a vCard send — that new behavior gets
+  // its own dedicated scenarios (26-28) with a fresh, not-yet-onboarded sender.
+  const sender = { id: 5, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: '2026-01-01T00:00:00.000Z' };
+```
+
+3. Insert these three new scenarios into `main()`, immediately before `console.log('PASS: expense-flow.test.js');`:
+
+```js
+  // 26. A new sender (contact_card_sent_at null) triggers a vCard MMS send on their first
+  // message, marks contact_card_sent_at, and the main reply still proceeds normally.
+  {
+    const newSender = { id: 9, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: null };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': newSender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['api.twilio.com', jsonOk({ sid: 'SM_vcard' })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, "a new sender's first message must still process normally and produce a reply");
+    const twilioCall = fetchImpl.calls.find((c) => c.url.includes('api.twilio.com'));
+    assert(twilioCall, 'a new sender must trigger an outbound vCard MMS send');
+    const twilioBody = new URLSearchParams(twilioCall.init.body);
+    assert(twilioBody.get('MediaUrl') === 'https://expense-intake.example.workers.dev/contact-card/1', "the vCard MMS must point MediaUrl at this client's /contact-card route");
+    assert(twilioBody.get('To') === '+15551234567', 'the vCard MMS must go to the sender who just texted in');
+    const markSentCall = db.calls.find((c) => c.sql.includes('UPDATE authorized_senders SET contact_card_sent_at'));
+    assert(markSentCall && markSentCall.params[1] === 9, 'contact_card_sent_at must be marked for this sender once the vCard send succeeds');
+  }
+
+  // 27. A vCard MMS send failure must not affect the main reply, and contact_card_sent_at
+  // must NOT be marked, so it's retried on the sender's next message.
+  {
+    const newSender = { id: 9, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: null };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': newSender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['api.twilio.com', async () => ({ ok: false, status: 400, json: async () => ({ code: 21211, message: 'Invalid To Phone Number' }) })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a failed vCard send must not prevent the main reply from being produced');
+    const markSentCall = db.calls.find((c) => c.sql.includes('UPDATE authorized_senders SET contact_card_sent_at'));
+    assert(!markSentCall, 'contact_card_sent_at must not be marked when the vCard send fails, so it is retried next time');
+  }
+
+  // 28. A sender who already has contact_card_sent_at set must not trigger another vCard send.
+  {
+    const onboardedSender = { id: 5, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: '2026-01-01T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': onboardedSender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'an already-onboarded sender must still process normally');
+    const twilioCall = fetchImpl.calls.find((c) => c.url.includes('api.twilio.com'));
+    assert(!twilioCall, 'an already-onboarded sender must not trigger another vCard send attempt');
+  }
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/expense-flow.test.js`
+Expected: fails — `processExpenseMessage` has no `maybeSendContactCard` logic yet, so scenario 26/27's `twilioCall` assertions fail (no `api.twilio.com` call ever happens) and scenario 28 fails too until the guard exists — but note it will currently "pass" for the wrong reason (no vCard logic exists at all yet); the meaningful failures are 26 and 27.
+
+- [ ] **Step 3: Wire it in**
+
+Update the import block near the top of `expense-intake/src/expense-flow.js`:
+
+```js
+import {
+  findClientByTwilioNumber, findAuthorizedSender, findHousesForClient,
+  insertExpense, insertPendingReview, findPendingReviewById, deletePendingReview,
+  findExpenseById, updateExpenseHouse,
+  findOldestPendingReviewForClient, findNextPendingReviewForClient,
+  markContactCardSent,
+} from './db.js';
+import { sendSms } from './twilio.js';
+import { getGoogleAccessToken } from './google-auth.js';
+```
+
+Add this new function to `expense-intake/src/expense-flow.js`, immediately before `export async function processExpenseMessage`:
+
+```js
+// Sends a new authorized sender a tappable vCard the first time they text in — see Step 8's
+// design spec. This must never fail or block the sender's actual reply: any error here is
+// caught and logged, leaving contact_card_sent_at null so it's simply retried on their next
+// message, instead of propagating up and turning a successful expense log into a 500.
+async function maybeSendContactCard({ client, sender, fields, env, deps }) {
+  if (sender.contact_card_sent_at) {
+    return;
+  }
+  try {
+    const body = await safeGenerateSmsCopy('contact_card_intro', { business: client.business_name }, env, deps);
+    const mediaUrl = `${env.WORKER_BASE_URL}/contact-card/${client.id}`;
+    await sendSms({
+      accountSid: env.TWILIO_ACCOUNT_SID,
+      authToken: env.TWILIO_AUTH_TOKEN,
+      from: client.twilio_number,
+      to: fields.from,
+      body,
+      mediaUrl,
+      fetchImpl: deps.fetchImpl,
+    });
+    await markContactCardSent(env.DB, sender.id, new Date().toISOString());
+  } catch (err) {
+    console.error('Failed to send contact card', { senderId: sender.id, error: err.message });
+  }
+}
+```
+
+In `processExpenseMessage`, add a call right after the sender lookup succeeds:
+
+```js
+  const sender = await findAuthorizedSender(env.DB, client.id, fields.from);
+  if (!sender) {
+    return { smsBody: '' };
+  }
+
+  await maybeSendContactCard({ client, sender, fields, env, deps });
+
+  const houses = await findHousesForClient(env.DB, client.id);
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `node expense-intake/test/expense-flow.test.js`
+Expected: `PASS: expense-flow.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test.js
+```
+
+---
+
+### Task 43: `handleGetContactCard` route handler
+
+**Files:**
+- Modify: `expense-intake/src/handlers.js`
+- Modify: `expense-intake/test/handlers.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/handlers.test.js`:
+
+```js
+import { handleSmsWebhook, handleGetReceipt, handleGetContactCard } from '../src/handlers.js';
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: handlers.test.js');`:
+
+```js
+  // handleGetContactCard: found
+  {
+    const clientRow = { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' };
+    const db = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': clientRow });
+    const found = await handleGetContactCard({ clientId: '1', db });
+    assert(found.status === 200 && found.contentType === 'text/vcard', 'a valid client id must serve a vCard with the correct content type');
+    assert(found.body.includes('FN:Acme Rentals Expense Tracker'), "the served vCard must carry the client's business name");
+  }
+
+  // handleGetContactCard: client not found
+  {
+    const db = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null });
+    const missing = await handleGetContactCard({ clientId: '999', db });
+    assert(missing.status === 404, 'an unknown client id must 404');
+  }
+
+  // handleGetContactCard: non-numeric clientId must 404, not attempt a broken query
+  {
+    const db = createFakeD1();
+    const bad = await handleGetContactCard({ clientId: 'not-a-number', db });
+    assert(bad.status === 404, 'a non-numeric clientId must 404 rather than attempting a query');
+  }
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/handlers.test.js`
+Expected: fails — `handleGetContactCard` is not yet exported from `../src/handlers.js`.
+
+- [ ] **Step 3: Add the handler**
+
+Update the import block at the top of `expense-intake/src/handlers.js`:
+
+```js
+// expense-intake/src/handlers.js
+import { parseFormBody, verifyTwilioSignature, extractWebhookFields } from './twilio.js';
+import { generateReceiptKey, storeReceiptPhoto } from './receipt-storage.js';
+import { processExpenseMessage } from './expense-flow.js';
+import { buildTwiml } from './twiml.js';
+import { getCachedReply, cacheReply } from './message-dedup.js';
+import { findClientById } from './db.js';
+import { buildVCard } from './vcard.js';
+```
+
+Append to `expense-intake/src/handlers.js`:
+
+```js
+
+// This route is deliberately public and unauthenticated, same as handleGetReceipt — but for
+// a different reason: a vCard isn't sensitive data (just a business name and the client's
+// own already-public-facing Twilio number), so there's no unguessable-key requirement here,
+// unlike a receipt photo. See Step 8's design spec.
+export async function handleGetContactCard({ clientId, db }) {
+  const id = Number.parseInt(clientId, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    return { status: 404, contentType: 'text/plain', body: 'Not found' };
+  }
+  const client = await findClientById(db, id);
+  if (!client) {
+    return { status: 404, contentType: 'text/plain', body: 'Not found' };
+  }
+  const vcard = buildVCard({ businessName: client.business_name, phoneNumber: client.twilio_number });
+  return { status: 200, contentType: 'text/vcard', body: vcard };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/handlers.test.js`
+Expected: `PASS: handlers.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/handlers.js expense-intake/test/handlers.test.js
+```
+
+---
+
+### Task 44: Wire the route into `index.js`, and docs
+
+**Files:**
+- Modify: `expense-intake/src/index.js`
+- Modify: `expense-intake/test/index.test.js`
+- Modify: `expense-intake/README.md`
+
+No `wrangler.toml` change is needed this step — `DB`, `WORKER_BASE_URL`, and the `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` secrets all already exist from earlier steps.
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/index.test.js`, immediately after the existing `GET /receipts/:key for a missing key -> 404` scenario, before the `scheduled()` scenarios added in Step 7:
+
+```js
+  // GET /contact-card/:clientId through the real routing layer
+  const contactCardDb = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' } });
+  request = new Request('https://expense-intake.example.com/contact-card/1', { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv({ DB: contactCardDb }));
+  assert(response.status === 200 && response.headers.get('Content-Type') === 'text/vcard', 'a valid client id must serve a vCard through the real GET /contact-card/:clientId route');
+
+  // GET /contact-card/:clientId for an unknown client -> 404
+  request = new Request('https://expense-intake.example.com/contact-card/999', { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv({ DB: createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null }) }));
+  assert(response.status === 404, 'an unknown client id must 404 through the real route');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/index.test.js`
+Expected: fails — `GET /contact-card/1` falls through to the catch-all 404 JSON response instead of serving a vCard, since `src/index.js` has no route for it yet.
+
+- [ ] **Step 3: Wire the route**
+
+Update the import and add a new route branch in `expense-intake/src/index.js`:
+
+```js
+import { handleSmsWebhook, handleGetReceipt, handleGetContactCard } from './handlers.js';
+```
+
+Insert this branch immediately after the existing `GET /receipts/` branch, before the catch-all 404:
+
+```js
+    if (request.method === 'GET' && url.pathname.startsWith('/contact-card/')) {
+      const clientId = url.pathname.slice('/contact-card/'.length);
+      const result = await handleGetContactCard({ clientId, db: env.DB });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `node expense-intake/test/index.test.js`
+Expected: `PASS: index.test.js`
+
+- [ ] **Step 5: Update the README**
+
+In `expense-intake/README.md`, add a new `## Routes` bullet, immediately after the `GET /receipts/:key` bullet:
+
+```markdown
+- `GET /contact-card/:clientId` — serves a generated vCard for the given
+  client, no authentication (not sensitive data — just a business name
+  and the client's own already-public Twilio number). Used as the
+  `MediaUrl` for the one-time save-contact MMS a new authorized sender
+  gets on their first message.
+```
+
+Update the `## Status` section:
+
+```markdown
+## Status
+
+Build Order steps 1-8: repo scaffolding, D1 schema, the provider
+abstraction, the Twilio inbound webhook with R2 photo storage, the full
+happy-path pipeline (parse, categorize, file to Sheets/D1 or
+`pending_review`), Twilio-retry dedup protection, the interactive
+house-selection reply flow, the 10-minute post-confirmation correction
+window, the client-initiated `"pending"` review queue, the daily purge /
+monthly nudge Cron Triggers, and save-contact onboarding (a one-time
+vCard MMS to each newly authorized sender). See the specs under
+`docs/superpowers/specs/2026-08-18-*` for those steps' designs. Not yet
+built: the onboarding CLI script (step 9) — houses/clients/authorized
+senders still need manual SQL to create, and `houses.google_sheet_id`
+must still be set by hand.
+```
+
+- [ ] **Step 6: Run the full suite one more time**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 7: Stage the change**
+
+```bash
+git add expense-intake/src/index.js expense-intake/test/index.test.js expense-intake/README.md
+```
+
+---
+
+## Self-Review — Step 8
+
+**Spec coverage for Step 8:** The vCard-via-MMS delivery mechanism → Task 39's `buildVCard` + Task 41's `mediaUrl`-extended `sendSms` + Task 43's `GET /contact-card/:clientId`. The trigger point (right after sender authorization, before any expense/Step-5/Step-6 flow routing) and non-blocking/never-fails guarantee → Task 42's `maybeSendContactCard`, with its own try/catch and three dedicated test scenarios (success, send-failure, already-onboarded no-op). The `contact_card_sent_at` write-once-on-success/leave-null-on-failure behavior → Task 38's `markContactCardSent` + Task 42's usage of it, tested explicitly in scenario 27. The new `contact_card_intro` copy type going through the same `safeGenerateSmsCopy` pattern as everything else → Task 40 + Task 42's call site.
+
+**Not yet in scope, intentionally (later Build Order step):** the onboarding CLI script (step 9) that actually creates the `clients`/`houses`/`authorized_senders` rows this step's logic operates on — this step only handles what happens the first time an already-provisioned sender texts in, exactly as scoped in the design spec.
+
+**Placeholder scan:** No TBD/TODO markers. No new secrets or bindings were introduced — `DB`, `WORKER_BASE_URL`, and the Twilio secrets all already existed; Task 44 explicitly calls out that `wrangler.toml` needs no change this step, rather than silently omitting a step other Build Order steps have had.
+
+**Type consistency:** `buildVCard({ businessName, phoneNumber })` (Task 39) is called with those exact field names, sourced from `client.business_name`/`client.twilio_number`, in Task 43's `handleGetContactCard` — no mismatch between the D1 column names and the function's parameter names. `sendSms`'s new `mediaUrl` parameter (Task 41) is optional and additive; every pre-existing call site (Step 7's `sendMonthlyNudges`) continues to omit it and is unaffected, verified by Task 41's own test asserting the earlier plain-SMS call in that same test file never gained a `MediaUrl` field. `maybeSendContactCard`'s `{ client, sender, fields, env, deps }` parameter shape matches the exact variable names already in scope at its call site inside `processExpenseMessage` — no renaming or repacking needed. `findClientById`/`markContactCardSent` (Task 38) are called with the same argument order in both their own tests and Task 42/43's usage.
