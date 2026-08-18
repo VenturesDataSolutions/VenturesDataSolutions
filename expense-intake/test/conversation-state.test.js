@@ -2,6 +2,7 @@
 import {
   getAwaitingHouse, setAwaitingHouse, clearAwaitingHouse,
   getCorrectionState, setCorrectionState, clearCorrectionState,
+  getPendingQueueState, setPendingQueueState, clearPendingQueueState,
 } from '../src/conversation-state.js';
 import { createFakeKV } from './fake-kv.js';
 
@@ -55,6 +56,33 @@ async function main() {
   await setCorrectionState(kv7, '+15551234567', { expenseId: 1, houseId: 10, spreadsheetId: 'sheet_abc', sheetRow: 5 });
   await clearCorrectionState(kv7, '+15551234567');
   assert((await getCorrectionState(kv7, '+15551234567')) === null, 'clearCorrectionState must delete the stored state');
+
+  // pending_queue: not set
+  const kv8 = createFakeKV();
+  const missingQueue = await getPendingQueueState(kv8, '+15551234567');
+  assert(missingQueue === null, 'getPendingQueueState must return null when nothing is stored for this phone');
+
+  // pending_queue: set then get, with a 24-hour TTL
+  const kv9 = createFakeKV();
+  await setPendingQueueState(kv9, '+15551234567', { pendingReviewId: 50 });
+  const queuePutCall = kv9.calls.find((c) => c.method === 'put');
+  assert(queuePutCall.key === 'pending_queue:+15551234567', 'setPendingQueueState must key by pending_queue:<phone>');
+  assert(queuePutCall.options.expirationTtl === 86400, 'setPendingQueueState must use a 24-hour (86400s) TTL — an on-demand session, not a time-critical window like awaiting_house/correction');
+  const queueState = await getPendingQueueState(kv9, '+15551234567');
+  assert(queueState.pendingReviewId === 50, 'getPendingQueueState must return the exact stored state, JSON round-tripped');
+
+  // pending_queue: setting again for the same phone overwrites (advancing the cursor)
+  const kv10 = createFakeKV();
+  await setPendingQueueState(kv10, '+15551234567', { pendingReviewId: 50 });
+  await setPendingQueueState(kv10, '+15551234567', { pendingReviewId: 51 });
+  const advanced = await getPendingQueueState(kv10, '+15551234567');
+  assert(advanced.pendingReviewId === 51, 'a second setPendingQueueState call for the same phone must overwrite the first (advancing the cursor)');
+
+  // pending_queue: clear
+  const kv11 = createFakeKV();
+  await setPendingQueueState(kv11, '+15551234567', { pendingReviewId: 50 });
+  await clearPendingQueueState(kv11, '+15551234567');
+  assert((await getPendingQueueState(kv11, '+15551234567')) === null, 'clearPendingQueueState must delete the stored state');
 
   console.log('PASS: conversation-state.test.js');
 }

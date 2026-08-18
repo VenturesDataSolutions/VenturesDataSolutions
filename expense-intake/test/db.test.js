@@ -8,6 +8,8 @@ import {
   deletePendingReview,
   findExpenseById,
   updateExpenseHouse,
+  findOldestPendingReviewForClient,
+  findNextPendingReviewForClient,
 } from '../src/db.js';
 import { createFakeD1 } from './fake-d1.js';
 
@@ -127,6 +129,30 @@ async function main() {
     JSON.stringify(db12.calls[0].params) === JSON.stringify([11, 8, 42]),
     'updateExpenseHouse must bind house_id, sheet_row, then the expense id (matching the SET ... WHERE id = ? clause order)'
   );
+
+  // findOldestPendingReviewForClient
+  const oldestPending = { id: 50, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.6 };
+  const db13 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': oldestPending });
+  const foundOldest = await findOldestPendingReviewForClient(db13, 1);
+  assert(foundOldest === oldestPending, 'findOldestPendingReviewForClient must return the row from the fake DB');
+  assert(db13.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
+
+  // findOldestPendingReviewForClient: none found
+  const db14 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': null });
+  const noOldest = await findOldestPendingReviewForClient(db14, 999);
+  assert(noOldest === null, 'findOldestPendingReviewForClient must return null when the client has no pending items');
+
+  // findNextPendingReviewForClient
+  const nextPending = { id: 51, client_id: 1, house_id: 10, amount_guess: 42, category_guess: 'Materials', photo_r2_key: null, raw_text: 'HD $42', confidence: 0.5 };
+  const db15 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': nextPending });
+  const foundNext = await findNextPendingReviewForClient(db15, 1, 50);
+  assert(foundNext === nextPending, 'findNextPendingReviewForClient must return the row from the fake DB');
+  assert(db15.calls[0].params[0] === 1 && db15.calls[0].params[1] === 50, 'must bind clientId then afterId, in that order');
+
+  // findNextPendingReviewForClient: none found (was the last item)
+  const db16 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': null });
+  const noNext = await findNextPendingReviewForClient(db16, 1, 999);
+  assert(noNext === null, 'findNextPendingReviewForClient must return null when there is no item after the cursor');
 
   console.log('PASS: db.test.js');
 }

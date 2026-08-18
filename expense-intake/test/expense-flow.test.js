@@ -595,6 +595,215 @@ async function main() {
     assert(correctionState && correctionState.expenseId === 1, 'the correction window must be overwritten to point at the newly-filed expense, not left stale pointing at the old one');
   }
 
+  // 18. "pending" with no pending items replies with the empty message, no queue state set
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': null,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: "You're all caught up." })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'pending', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"pending" with nothing pending must still produce a reply');
+    assert((await kv.get('pending_queue:+15551234567')) === null, 'no queue state should be set when there is nothing pending');
+  }
+
+  // 19. "pending" (case/whitespace-insensitive) with an item shows its prompt and sets the cursor
+  {
+    const pendingItem = { id: 50, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.6, created_at: '2026-08-12T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': pendingItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $10.00 guessed Materials from 2026-08-12.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '  PENDING  ', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"pending" with an item must reply with its prompt');
+    const state = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(state && state.pendingReviewId === 50, '"PENDING" (any case/whitespace) must set the queue cursor to the oldest item');
+  }
+
+  // 20. "skip" advances the cursor to the next item and shows its prompt
+  {
+    const nextItem = { id: 51, client_id: 1, house_id: 10, amount_guess: 42, category_guess: 'Materials', photo_r2_key: null, raw_text: 'HD $42', confidence: 0.5, created_at: '2026-08-14T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': nextItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $42.00 guessed Materials from 2026-08-14.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'skip', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"skip" must reply with the next item\'s prompt');
+    const state = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(state && state.pendingReviewId === 51, '"skip" must advance the cursor to the next item after the current one');
+  }
+
+  // 21. "skip" past the last item clears the cursor and replies with the empty message
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': null,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 51 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: "You're all caught up." })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'skip', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'skipping the last item must still produce a reply');
+    assert((await kv.get('pending_queue:+15551234567')) === null, 'the queue cursor must be cleared once there is nothing left to show');
+  }
+
+  // 22. "delete" removes the current item and advances (chains) to the next one
+  {
+    const nextItem = { id: 51, client_id: 1, house_id: 10, amount_guess: 42, category_guess: 'Materials', photo_r2_key: null, raw_text: 'HD $42', confidence: 0.5, created_at: '2026-08-14T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+      'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': nextItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $42.00 guessed Materials from 2026-08-14.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'delete', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"delete" must chain into the next item\'s prompt');
+    const deleteCall = db.calls.find((c) => c.sql.includes('DELETE FROM pending_review'));
+    assert(deleteCall && deleteCall.params[0] === 50, '"delete" must delete the current (cursor) item, not the next one');
+    const state = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(state && state.pendingReviewId === 51, '"delete" must advance the cursor to the next item after the deleted one');
+  }
+
+  // 23. A house-name match resolves the current item: files it, deletes it, clears the
+  // queue cursor (no chaining), and replies with just the filing confirmation.
+  {
+    const pendingItem = { id: 50, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.6, created_at: '2026-08-12T00:00:00.000Z' };
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+      'SELECT * FROM pending_review WHERE id = ?': pendingItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":11}', copy: 'Logged: $10.00, Materials, 456 Oak Ave.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '456 Oak', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a resolved queued item must produce a confirmation SMS body');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert && expenseInsert.params[0] === 11, 'the resolved item must be filed under the matched house');
+    const pendingDelete = db.calls.find((c) => c.sql.includes('DELETE FROM pending_review'));
+    assert(pendingDelete && pendingDelete.params[0] === 50, 'the resolved pending_review row must be deleted');
+    assert((await kv.get('pending_queue:+15551234567')) === null, 'resolving an item must clear the queue cursor rather than chaining to the next item');
+  }
+
+  // 24. An unrecognized reply while a queue cursor is active leaves it untouched and falls
+  // through to normal new-expense processing.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'pending_queue:+15551234567': JSON.stringify({ pendingReviewId: 50 }) });
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":null}', parse: JSON.stringify({ vendor: 'Lowes', amount: 8, category: 'Materials', confidence: 0.9, raw_text: 'Lowes $8' }), copy: 'Logged: $8.00, Materials, Main St.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $8 for screws', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'an unrecognized queue reply must still produce a normal SMS body from the fallthrough processing');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'an unrecognized queue reply must be processed as a new expense (high confidence, single house)');
+  }
+
+  // 25. "pending" overrides an active awaiting_house window from Step 5 (checked first)
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const pendingItem = { id: 60, client_id: 1, house_id: null, amount_guess: 5, category_guess: 'Other', photo_r2_key: null, raw_text: 'x', confidence: 0.3, created_at: '2026-08-15T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+      'SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1': pendingItem,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'awaiting_house:+15551234567': JSON.stringify({ pendingReviewId: 77, attempt: 0 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ copy: 'Pending: $5.00 guessed Other from 2026-08-15.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'pending', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, '"pending" must produce the queue prompt even with an active awaiting_house window');
+    const queueState = await kv.get('pending_queue:+15551234567', { type: 'json' });
+    assert(queueState && queueState.pendingReviewId === 60, '"pending" must set the queue cursor regardless of the pre-existing awaiting_house state');
+    const awaitingState = await kv.get('awaiting_house:+15551234567', { type: 'json' });
+    assert(awaitingState && awaitingState.pendingReviewId === 77, 'the awaiting_house state must be left untouched, not explicitly cleared, by starting a pending walkthrough');
+  }
+
   console.log('PASS: expense-flow.test.js');
 }
 

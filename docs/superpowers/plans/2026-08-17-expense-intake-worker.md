@@ -6144,7 +6144,7 @@ git add expense-intake/README.md
 - Modify: `expense-intake/src/db.js`
 - Modify: `expense-intake/test/db.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/db.test.js`, immediately before `console.log('PASS: db.test.js');`, and add `findOldestPendingReviewForClient, findNextPendingReviewForClient` to the existing import from `'../src/db.js'`:
 
@@ -6174,12 +6174,12 @@ Insert this block into `main()` of `expense-intake/test/db.test.js`, immediately
   assert(noNext === null, 'findNextPendingReviewForClient must return null when there is no item after the cursor');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/db.test.js`
 Expected: fails — `findOldestPendingReviewForClient`/`findNextPendingReviewForClient` are not yet exported from `../src/db.js`.
 
-- [ ] **Step 3: Add the query helpers**
+- [x] **Step 3: Add the query helpers**
 
 Append to `expense-intake/src/db.js`:
 
@@ -6194,17 +6194,17 @@ export async function findNextPendingReviewForClient(db, clientId, afterId) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/db.test.js`
 Expected: `PASS: db.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/db.js expense-intake/test/db.test.js
@@ -6218,7 +6218,7 @@ git add expense-intake/src/db.js expense-intake/test/db.test.js
 - Modify: `expense-intake/src/providers/shared.js`
 - Modify: `expense-intake/test/providers/shared.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/providers/shared.test.js`, immediately after the `SMS_COPY_ANCHORS.correction_confirmed` assertion added in Step 5:
 
@@ -6237,12 +6237,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: provider
   assert(pendingEmptyPrompt.system.includes('caught up') || pendingEmptyPrompt.system.includes('clear'), 'pending_empty prompt must include its tone anchors');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: fails — `SMS_COPY_ANCHORS.pending_item_prompt` (and `pending_empty`) are `undefined`.
 
-- [ ] **Step 3: Add the new anchors**
+- [x] **Step 3: Add the new anchors**
 
 In `expense-intake/src/providers/shared.js`, add two keys to `SMS_COPY_ANCHORS`, immediately after `correction_confirmed`:
 
@@ -6257,17 +6257,17 @@ In `expense-intake/src/providers/shared.js`, add two keys to `SMS_COPY_ANCHORS`,
   ],
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: `PASS: providers/shared.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
@@ -6281,7 +6281,7 @@ git add expense-intake/src/providers/shared.js expense-intake/test/providers/sha
 - Modify: `expense-intake/src/conversation-state.js`
 - Modify: `expense-intake/test/conversation-state.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/conversation-state.test.js`, immediately before `console.log('PASS: conversation-state.test.js');`, and add `getPendingQueueState, setPendingQueueState, clearPendingQueueState` to the existing import from `'../src/conversation-state.js'`:
 
@@ -6314,12 +6314,12 @@ Insert this block into `main()` of `expense-intake/test/conversation-state.test.
   assert((await getPendingQueueState(kv11, '+15551234567')) === null, 'clearPendingQueueState must delete the stored state');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/conversation-state.test.js`
 Expected: fails — `getPendingQueueState`/`setPendingQueueState`/`clearPendingQueueState` are not yet exported from `../src/conversation-state.js`.
 
-- [ ] **Step 3: Add the new helpers**
+- [x] **Step 3: Add the new helpers**
 
 In `expense-intake/src/conversation-state.js`, add a second TTL constant and the three new functions:
 
@@ -6346,17 +6346,17 @@ export async function clearPendingQueueState(kv, phone) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/conversation-state.test.js`
 Expected: `PASS: conversation-state.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/conversation-state.js expense-intake/test/conversation-state.test.js
@@ -6370,7 +6370,7 @@ git add expense-intake/src/conversation-state.js expense-intake/test/conversatio
 - Modify: `expense-intake/src/expense-flow.js` (full replacement)
 - Modify: `expense-intake/test/expense-flow.test.js` (append new scenarios)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add `findOldestPendingReviewForClient, findNextPendingReviewForClient` to the existing `'../src/fake-d1.js'`... (no — these come from `'../src/db.js'`, which `expense-flow.test.js` doesn't import directly; no import change needed there since the test only calls `processExpenseMessage`). Insert these scenarios into `main()` of `expense-intake/test/expense-flow.test.js`, immediately before `console.log('PASS: expense-flow.test.js');`:
 
@@ -6585,12 +6585,12 @@ Add `findOldestPendingReviewForClient, findNextPendingReviewForClient` to the ex
   }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `node expense-intake/test/expense-flow.test.js`
 Expected: fails — the current `processExpenseMessage` has no `"pending"`/queue handling at all, so scenarios 18-25 fail (e.g. `"pending"` gets parsed as a normal expense message instead of triggering the queue).
 
-- [ ] **Step 3: Rewrite `src/expense-flow.js`**
+- [x] **Step 3: Rewrite `src/expense-flow.js`**
 
 Replace `expense-intake/src/expense-flow.js` in full:
 
@@ -6971,17 +6971,17 @@ export async function processExpenseMessage({ fields, photoR2Key, env, deps = {}
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `node expense-intake/test/expense-flow.test.js`
 Expected: `PASS: expense-flow.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test.js
@@ -6994,7 +6994,7 @@ git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test
 **Files:**
 - Modify: `expense-intake/README.md`
 
-- [ ] **Step 1: Update the `## Routes` section**
+- [x] **Step 1: Update the `## Routes` section**
 
 In `expense-intake/README.md`, add a new bullet to the `POST /sms` route's description in `## Routes`, immediately after the existing correction-window/house-selection bullet paragraph:
 
@@ -7008,7 +7008,7 @@ In `expense-intake/README.md`, add a new bullet to the `POST /sms` route's descr
   "all caught up" message) in the same reply.
 ```
 
-- [ ] **Step 2: Update the `## Status` section**
+- [x] **Step 2: Update the `## Status` section**
 
 Replace `## Status` in `expense-intake/README.md` with:
 
@@ -7031,12 +7031,12 @@ the onboarding CLI script (step 9) — houses currently need a
 their Sheet.
 ```
 
-- [ ] **Step 3: Run the full suite one more time**
+- [x] **Step 3: Run the full suite one more time**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 4: Stage the change**
+- [x] **Step 4: Stage the change**
 
 ```bash
 git add expense-intake/README.md

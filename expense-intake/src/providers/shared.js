@@ -52,6 +52,14 @@ export const SMS_COPY_ANCHORS = {
     'Updated — moved to [house]. Thanks for the heads up.',
     'Fixed, now logged under [house].',
   ],
+  pending_item_prompt: [
+    'Pending: $[amount] guessed [category] from [date]. Reply with the house name to file it, "skip" for the next one, or "delete" to discard.',
+    '$[amount], [category], logged [date] — still pending. House name to file, "skip" to move on, "delete" to remove.',
+  ],
+  pending_empty: [
+    "You're all caught up — no pending items to review.",
+    'Nothing pending right now — all clear.',
+  ],
 };
 
 export function buildSmsCopyPrompt(type, vars) {

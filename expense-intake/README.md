@@ -28,24 +28,32 @@ implementation plan and Build Order.
   `pending_review`). A repeated Twilio delivery of a message already fully
   processed (identified by `MessageSid`) replays the cached reply instead
   of reprocessing.
+
+  A client can also text `"pending"` at any time (this check runs before
+  the house-selection/correction checks above) to walk through their
+  `pending_review` items one at a time: reply with a house name to file
+  the current item, `"skip"` to see the next one, or `"delete"` to discard
+  it — `"skip"`/`"delete"` immediately show the next item (or an
+  "all caught up" message) in the same reply.
 - `GET /receipts/:key` — serves a stored receipt photo directly from R2, no
   authentication. Used by the "Photo" column link in each house's Sheet.
 
 ## Status
 
-Build Order steps 1-5: repo scaffolding, D1 schema, the provider
+Build Order steps 1-6: repo scaffolding, D1 schema, the provider
 abstraction, the Twilio inbound webhook with R2 photo storage, the full
 happy-path pipeline (parse, categorize, file to Sheets/D1 or
 `pending_review`), Twilio-retry dedup protection, the interactive
-house-selection reply flow, and the 10-minute post-confirmation correction
-window. See
+house-selection reply flow, the 10-minute post-confirmation correction
+window, and the client-initiated `"pending"` review queue. See
 `docs/superpowers/specs/2026-08-18-expense-intake-house-selection-correction-design.md`
-for the house-selection/correction design. Not yet built: the `pending`
-retrieval command for permanently-stuck ambiguous items (step 6), Cron
-Triggers for the daily purge and monthly nudge (step 7), save-contact
-onboarding (step 8), and the onboarding CLI script (step 9) — houses
-currently need a `google_sheet_id` set via manual SQL before the pipeline
-can file to their Sheet.
+and
+`docs/superpowers/specs/2026-08-18-expense-intake-pending-queue-design.md`
+for those two steps' designs. Not yet built: Cron Triggers for the daily
+purge and monthly nudge (step 7), save-contact onboarding (step 8), and
+the onboarding CLI script (step 9) — houses currently need a
+`google_sheet_id` set via manual SQL before the pipeline can file to
+their Sheet.
 
 ## Running the Worker's own tests
 

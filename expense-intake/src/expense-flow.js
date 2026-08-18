@@ -4,12 +4,14 @@ import {
   findClientByTwilioNumber, findAuthorizedSender, findHousesForClient,
   insertExpense, insertPendingReview, findPendingReviewById, deletePendingReview,
   findExpenseById, updateExpenseHouse,
+  findOldestPendingReviewForClient, findNextPendingReviewForClient,
 } from './db.js';
 import { getGoogleAccessToken } from './google-auth.js';
 import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow } from './sheets.js';
 import {
   getAwaitingHouse, setAwaitingHouse, clearAwaitingHouse,
   getCorrectionState, setCorrectionState, clearCorrectionState,
+  getPendingQueueState, setPendingQueueState, clearPendingQueueState,
 } from './conversation-state.js';
 
 const CONFIDENCE_THRESHOLD = 0.7; // tunable — see Step 4's Design decisions note in the plan
@@ -47,6 +49,14 @@ function houseLabel(house) {
   return house.nickname || house.address;
 }
 
+function pendingItemVars(item) {
+  return {
+    amount: item.amount_guess != null ? item.amount_guess.toFixed(2) : '0.00',
+    category: item.category_guess || 'Uncategorized',
+    date: item.created_at ? item.created_at.slice(0, 10) : '',
+  };
+}
+
 // Static fallback copy, used only if the AI copy-generation call itself fails. Deliberately
 // NOT the raw SMS_COPY_ANCHORS strings from providers/shared.js (Step 2) — those contain
 // literal bracket placeholders like "[amount]" meant only as few-shot prompt examples, never
@@ -58,6 +68,8 @@ const FALLBACK_SMS_COPY = {
   house_selection_retry: (vars) => `Sorry, could you confirm — is this for ${vars.house_list}?`,
   house_selection_giveup: () => 'No worries — saved this one for you to sort out later.',
   correction_confirmed: (vars) => `Updated — moved to ${vars.house}.`,
+  pending_item_prompt: (vars) => `Pending: $${vars.amount}, ${vars.category}, ${vars.date}. Reply with the house name to file it, "skip" for the next one, or "delete" to discard.`,
+  pending_empty: () => "You're all caught up — no pending items to review.",
 };
 
 // A copy-generation failure must never re-trigger writes that already succeeded. By the
@@ -85,8 +97,9 @@ async function safeGenerateSmsCopy(type, vars, env, deps) {
 
 // Writes an already-parsed, already-house-resolved expense to the house's Sheet + the
 // expenses table, and opens the 10-minute correction window for it. Shared by the normal
-// high-confidence auto-file path and by a house-selection reply that resolves a pending
-// item (Step 5) — both need the exact same write sequence.
+// high-confidence auto-file path, by a house-selection reply that resolves a pending item
+// (Step 5), and by resolving an item from the pending queue (Step 6) — all three need the
+// exact same write sequence.
 async function fileExpense({ house, parsed, fields, photoR2Key, env, deps }) {
   if (!house.google_sheet_id) {
     // A house with no Sheet set up is an onboarding gap, not a runtime parsing issue —
@@ -194,6 +207,66 @@ async function tryApplyCorrection({ state, houses, fields, env, deps }) {
   return safeGenerateSmsCopy('correction_confirmed', { house: houseLabel(newHouse) }, env, deps);
 }
 
+// Shows a pending item's prompt and sets the queue cursor to it, or — if there is no item —
+// clears the cursor and replies with the "all caught up" message. Shared by the initial
+// "pending" command and by every skip/delete/resolution advance (Step 6).
+async function showPendingItemOrEmpty({ item, phone, env, deps }) {
+  if (!item) {
+    await clearPendingQueueState(env.CONVERSATION_STATE, phone);
+    return safeGenerateSmsCopy('pending_empty', {}, env, deps);
+  }
+  await setPendingQueueState(env.CONVERSATION_STATE, phone, { pendingReviewId: item.id });
+  return safeGenerateSmsCopy('pending_item_prompt', pendingItemVars(item), env, deps);
+}
+
+async function handlePendingCommand({ client, fields, env, deps }) {
+  const item = await findOldestPendingReviewForClient(env.DB, client.id);
+  return showPendingItemOrEmpty({ item, phone: fields.from, env, deps });
+}
+
+// Interprets a reply while a pending-queue cursor is active: "skip"/"delete" advance the
+// cursor (chaining into the next item's prompt, or the empty message), a house-name match
+// resolves the current item. Returns `null` if the reply is none of these, telling the
+// caller to fall through to normal message processing — the cursor is left untouched in
+// that case, still valid for a later reply.
+async function handlePendingQueueReply({ state, client, houses, fields, env, deps }) {
+  const normalized = fields.body.trim().toLowerCase();
+
+  if (normalized === 'skip') {
+    const next = await findNextPendingReviewForClient(env.DB, client.id, state.pendingReviewId);
+    return showPendingItemOrEmpty({ item: next, phone: fields.from, env, deps });
+  }
+
+  if (normalized === 'delete') {
+    await deletePendingReview(env.DB, state.pendingReviewId);
+    const next = await findNextPendingReviewForClient(env.DB, client.id, state.pendingReviewId);
+    return showPendingItemOrEmpty({ item: next, phone: fields.from, env, deps });
+  }
+
+  const { houseId } = await matchHouseFromReply({ text: fields.body, houses }, env, deps);
+  if (houseId == null) {
+    return null;
+  }
+
+  const house = houses.find((h) => h.id === houseId);
+  const pending = await findPendingReviewById(env.DB, state.pendingReviewId);
+  const parsed = {
+    vendor: null,
+    amount: pending.amount_guess,
+    category: pending.category_guess || 'Other',
+    confidence: pending.confidence,
+    raw_text: pending.raw_text,
+  };
+  const smsBody = await fileExpense({ house, parsed, fields, photoR2Key: pending.photo_r2_key, env, deps });
+  await deletePendingReview(env.DB, state.pendingReviewId);
+  // No chaining after a resolution (per the design spec) — but the cursor still must be
+  // cleared, not just left alone, since it now points at a row that no longer exists. Leaving
+  // it would make the client's *next* reply (if not "pending") hit this function again with a
+  // stale pendingReviewId, and findPendingReviewById would resolve to null.
+  await clearPendingQueueState(env.CONVERSATION_STATE, fields.from);
+  return smsBody;
+}
+
 export async function processExpenseMessage({ fields, photoR2Key, env, deps = {} }) {
   if (!fields.body && !photoR2Key) {
     return { smsBody: '' };
@@ -211,11 +284,28 @@ export async function processExpenseMessage({ fields, photoR2Key, env, deps = {}
 
   const houses = await findHousesForClient(env.DB, client.id);
 
-  // A reply's text is checked against any in-flight house-selection prompt or open
-  // correction window before it's treated as a brand-new expense message. A photo-only
-  // message (no body text) has nothing to match against a house name, so it always skips
-  // straight to normal processing — same as Step 4's existing empty-body-for-text handling.
+  // A reply's text is checked against the pending-review queue command/cursor, then any
+  // in-flight house-selection prompt or open correction window, before it's treated as a
+  // brand-new expense message. A photo-only message (no body text) has nothing to match
+  // against a house name or command keyword, so it always skips straight to normal
+  // processing — same as Step 4's existing empty-body-for-text handling.
   if (fields.body) {
+    const normalizedBody = fields.body.trim().toLowerCase();
+
+    if (normalizedBody === 'pending') {
+      const smsBody = await handlePendingCommand({ client, fields, env, deps });
+      return { smsBody };
+    }
+
+    const pendingQueueState = await getPendingQueueState(env.CONVERSATION_STATE, fields.from);
+    if (pendingQueueState) {
+      const queueSmsBody = await handlePendingQueueReply({ state: pendingQueueState, client, houses, fields, env, deps });
+      if (queueSmsBody !== null) {
+        return { smsBody: queueSmsBody };
+      }
+      // Not a recognized queue action — fall through and process it as a new message below.
+    }
+
     const awaitingHouse = await getAwaitingHouse(env.CONVERSATION_STATE, fields.from);
     if (awaitingHouse) {
       const smsBody = await handleAwaitingHouseReply({ state: awaitingHouse, houses, fields, env, deps });

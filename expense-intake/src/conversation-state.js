@@ -5,6 +5,7 @@
 // Shares the CONVERSATION_STATE KV namespace Step 4's message-dedup.js already introduced,
 // under different key prefixes, rather than a second namespace.
 const STATE_TTL_SECONDS = 10 * 60;
+const PENDING_QUEUE_TTL_SECONDS = 24 * 60 * 60; // an on-demand session, not a time-critical window — see Step 6's design spec
 
 export async function getAwaitingHouse(kv, phone) {
   const value = await kv.get(`awaiting_house:${phone}`, { type: 'json' });
@@ -30,4 +31,17 @@ export async function setCorrectionState(kv, phone, state) {
 
 export async function clearCorrectionState(kv, phone) {
   await kv.delete(`correction:${phone}`);
+}
+
+export async function getPendingQueueState(kv, phone) {
+  const value = await kv.get(`pending_queue:${phone}`, { type: 'json' });
+  return value ?? null;
+}
+
+export async function setPendingQueueState(kv, phone, state) {
+  await kv.put(`pending_queue:${phone}`, JSON.stringify(state), { expirationTtl: PENDING_QUEUE_TTL_SECONDS });
+}
+
+export async function clearPendingQueueState(kv, phone) {
+  await kv.delete(`pending_queue:${phone}`);
 }

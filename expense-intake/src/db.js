@@ -44,3 +44,11 @@ export async function findExpenseById(db, id) {
 export async function updateExpenseHouse(db, { expenseId, houseId, sheetRow }) {
   return db.prepare('UPDATE expenses SET house_id = ?, sheet_row = ? WHERE id = ?').bind(houseId, sheetRow, expenseId).run();
 }
+
+export async function findOldestPendingReviewForClient(db, clientId) {
+  return db.prepare('SELECT * FROM pending_review WHERE client_id = ? ORDER BY id ASC LIMIT 1').bind(clientId).first();
+}
+
+export async function findNextPendingReviewForClient(db, clientId, afterId) {
+  return db.prepare('SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1').bind(clientId, afterId).first();
+}
