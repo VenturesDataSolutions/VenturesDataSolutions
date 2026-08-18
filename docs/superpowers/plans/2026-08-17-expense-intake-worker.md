@@ -3981,3 +3981,2143 @@ git add expense-intake/src/handlers.js expense-intake/src/index.js expense-intak
 **Placeholder scan:** No TBD/TODO markers. `WORKER_BASE_URL` uses the real, already-deployed URL (`https://expense-intake.venturesdatasolutions.workers.dev`) confirmed earlier in this project's setup, not a placeholder. `REPLACE_WITH_KV_NAMESPACE_ID` in Task 16's `wrangler.toml` addition is an intentional, documented placeholder (same pattern as Step 1's `REPLACE_WITH_D1_DATABASE_ID` and the original scaffold's KV placeholder note) — the real ID only exists after `wrangler kv namespace create` is run against the actual Cloudflare account, and Task 17's README update spells out that exact command.
 
 **Type consistency:** `processExpenseMessage`'s `{ fields, photoR2Key, env, deps }` parameter shape is used identically by Task 15 itself and by Task 17's `handleSmsWebhook`. `fields` (`{from, to, body, media, messageSid}`) matches `extractWebhookFields`'s output exactly, including the `messageSid` field Task 16 adds to it — `processExpenseMessage` doesn't touch `messageSid` at all (it's only consumed by `handleSmsWebhook`'s dedup check, one layer up), so widening `fields`'s shape didn't require touching Task 15's already-approved code. `env`'s expected keys (`DB`, `RECEIPTS_BUCKET`, `AI_PROVIDER`, `OPENROUTER_API_KEY`/`ANTHROPIC_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `WORKER_BASE_URL`, `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`, `IMAGES`, and now `CONVERSATION_STATE`) are consistent across Task 15's `processExpenseMessage`, Task 17's `handleSmsWebhook`, and `src/index.js`'s real binding wiring — no key is read under one name in one file and a different name elsewhere. `db.js`'s five functions (Task 10) are called with the same parameter names/order everywhere they're used in Task 15. `message-dedup.js`'s `getCachedReply`/`cacheReply` (Task 16) are called with the same `(kv, messageSid, ...)` argument order in both their own tests and Task 17's `handleSmsWebhook`. The `{status, contentType, body}` handler-result shape from Step 3 is preserved unchanged by `handleSmsWebhook`, `handleGetReceipt`, and the new dedup-cache-hit early return.
+
+---
+
+## Step 5: House-selection flow + 10-minute correction window
+
+**Design spec:** `docs/superpowers/specs/2026-08-18-expense-intake-house-selection-correction-design.md` (approved by the project owner). This step closes the two gaps Step 4 deliberately left open: a client's reply to "Which house is this for?" is now actually matched back to the pending item, and a client gets a 10-minute window after any auto-filed expense to correct the house it landed on.
+
+**Interface (from the design spec):** a new shared AI primitive, `matchHouseFromReply({ text, houses }, env, deps) -> { houseId }`, added to the provider abstraction alongside `parseExpense`/`generateSmsCopy`. Two new `CONVERSATION_STATE` KV key prefixes (`awaiting_house:<phone>`, `correction:<phone>`) track in-flight house-selection prompts and open correction windows, both a 10-minute TTL. A new `expenses.sheet_row` column records which Sheet row an expense landed on, so a correction can delete it and re-append to the new house's Sheet.
+
+**Design decisions locked in for this step:**
+- `matchHouseFromReply` returns `{ houseId: null }` on no confident match — callers decide what "no match" means in context (re-ask for house-selection, "not a correction, fall through" for the correction window). The function itself has no opinion about which flow is calling it.
+- Both `awaiting_house` and `correction` KV state omit `clientId` — by the time either is checked, `processExpenseMessage` has already resolved the client and its house list from the inbound message's own `to`/`from` pair, so the state only needs to carry what it can't otherwise derive (`pendingReviewId`/`attempt` for house-selection; `expenseId`/`houseId`/`spreadsheetId`/`sheetRow` for correction). A smaller state payload than the design spec's earlier draft — the spec anticipated carrying `clientId` on both, which turned out to be redundant once the actual call order in `processExpenseMessage` was worked out during implementation.
+- A house-selection match **files the pending item unconditionally** — once the house is known, the guess that was already computed (amount/category/confidence from the original parse) gets written as-is via the same `fileExpense` helper the normal high-confidence path uses. This mirrors the approved design spec's Feature 1 description exactly; the amount/confidence that produced a `pending_review` write in the first place isn't re-evaluated a second time. (A `null` amount is still allowed through — `fileExpense`/`insertExpense` accept a null amount as they already did in Step 4, and the D1 schema has no `NOT NULL` constraint on `expenses.amount`.)
+- House-selection re-asks **once**: `attempt: 0 -> 1` on the first no-match, then gives up (clears `awaiting_house`, leaves the item in `pending_review` permanently) on the second. This matches the design spec's "re-ask once, then stay pending" decision.
+- A correction only ever changes the house — never amount, category, or vendor. Deleting the old Sheet row assumes the standard single `"Sheet1"` tab at `sheetId` (gid) `0`, the same tab `appendExpenseRow`'s hardcoded `Sheet1!A:I` range already targets; no spreadsheet-metadata lookup is performed to resolve this at runtime, per the design spec.
+- `awaiting_house` is checked before `correction` on every inbound message with a non-empty body (checked in that order because an in-flight house-selection prompt should never be silently reinterpreted as a correction reply). A message with an empty body (photo-only) skips both checks entirely — there's no text to match against a house name, so it's always processed as a new expense message, exactly like Step 4's existing empty-body handling for text.
+- `insertExpense` and `insertPendingReview` now return the new row's `id` (via D1's `result.meta.last_row_id`), instead of the raw `.run()` result — needed so `fileExpense` can populate `correction` state with the new `expenseId`, and so the ambiguous-house branch can populate `awaiting_house` state with the new `pendingReviewId`. No existing test asserted on either function's return value (both were previously just `await`ed and discarded), so this is a non-breaking extension of already-shipped code, not a redesign.
+
+### Task 18: Provider shared module — `matchHouseFromReply` prompt and result validation
+
+**Files:**
+- Modify: `expense-intake/src/providers/shared.js`
+- Modify: `expense-intake/test/providers/shared.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/providers/shared.test.js`:
+
+```js
+import {
+  TAX_CATEGORIES,
+  PARSE_EXPENSE_SYSTEM_PROMPT,
+  SMS_COPY_ANCHORS,
+  buildSmsCopyPrompt,
+  extractJsonBlock,
+  normalizeParseExpenseResult,
+  ProviderParseError,
+  MATCH_HOUSE_SYSTEM_PROMPT,
+  buildMatchHouseUserMessage,
+  normalizeMatchHouseResult,
+} from '../../src/providers/shared.js';
+```
+
+Insert this block into `main()`, immediately before the existing `console.log('PASS: providers/shared.test.js');` line:
+
+```js
+  // MATCH_HOUSE_SYSTEM_PROMPT: must instruct JSON-only output with a house_id key
+  assert(/house_id/.test(MATCH_HOUSE_SYSTEM_PROMPT), 'match-house prompt must mention house_id');
+  assert(/JSON/i.test(MATCH_HOUSE_SYSTEM_PROMPT), 'match-house prompt must instruct JSON-only output');
+
+  // buildMatchHouseUserMessage: lists houses with id/address/nickname, carries the reply text
+  const matchHouses = [
+    { id: 10, address: '123 Main St', nickname: 'Main St' },
+    { id: 11, address: '456 Oak Ave', nickname: null },
+  ];
+  const matchUserMessage = buildMatchHouseUserMessage('the main st one', matchHouses);
+  assert(matchUserMessage.includes('the main st one'), 'user message must carry the reply text verbatim');
+  assert(matchUserMessage.includes('id: 10') && matchUserMessage.includes('123 Main St') && matchUserMessage.includes('Main St'), "user message must list the first house's id, address, and nickname");
+  assert(matchUserMessage.includes('id: 11') && matchUserMessage.includes('456 Oak Ave'), 'user message must list the second house even without a nickname');
+
+  // normalizeMatchHouseResult: a valid matching house id
+  const matchedHouse = normalizeMatchHouseResult({ house_id: 10 }, matchHouses);
+  assert(matchedHouse.houseId === 10, 'normalizeMatchHouseResult must pass through a valid house_id');
+
+  // normalizeMatchHouseResult: explicit null means no match
+  const noMatchHouse = normalizeMatchHouseResult({ house_id: null }, matchHouses);
+  assert(noMatchHouse.houseId === null, 'normalizeMatchHouseResult must allow house_id: null to mean no confident match');
+
+  // normalizeMatchHouseResult: a house_id not in the provided list throws
+  let threwUnknownHouse = false;
+  try {
+    normalizeMatchHouseResult({ house_id: 999 }, matchHouses);
+  } catch (err) {
+    threwUnknownHouse = true;
+    assert(err instanceof ProviderParseError, 'an out-of-list house_id must throw ProviderParseError');
+  }
+  assert(threwUnknownHouse, 'normalizeMatchHouseResult must reject a house_id that is not one of the provided houses');
+
+  // normalizeMatchHouseResult: a response missing the house_id key throws
+  let threwMissingKey = false;
+  try {
+    normalizeMatchHouseResult({}, matchHouses);
+  } catch (err) {
+    threwMissingKey = true;
+    assert(err instanceof ProviderParseError, 'a response missing house_id must throw ProviderParseError');
+  }
+  assert(threwMissingKey, 'normalizeMatchHouseResult must reject a response with no house_id key at all');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: fails — `MATCH_HOUSE_SYSTEM_PROMPT`/`buildMatchHouseUserMessage`/`normalizeMatchHouseResult` are not yet exported from `../../src/providers/shared.js`.
+
+- [ ] **Step 3: Add the new exports to the shared module**
+
+Append to `expense-intake/src/providers/shared.js` (after `normalizeParseExpenseResult`):
+
+```js
+
+export const MATCH_HOUSE_SYSTEM_PROMPT = `You are matching a text reply from a real estate investment property client to one of their properties.
+
+Given the client's reply and a list of their properties (each with an id, address, and optional nickname), determine which property the reply refers to, if any. The reply might be a full or partial address, a nickname, a casual description, or something unrelated.
+
+Respond with ONLY a single JSON object with exactly one key, "house_id": either the numeric id of the matching property, or null if the reply does not clearly refer to any of the listed properties. No other text, markdown, or code fences.`;
+
+export function buildMatchHouseUserMessage(text, houses) {
+  const houseLines = houses.map((house) => {
+    const nicknamePart = house.nickname ? `, nickname: ${house.nickname}` : '';
+    return `- id: ${house.id}, address: ${house.address}${nicknamePart}`;
+  }).join('\n');
+  return `Client reply: "${text}"\n\nProperties:\n${houseLines}`;
+}
+
+export function normalizeMatchHouseResult(raw, houses) {
+  if (!raw || typeof raw !== 'object' || !('house_id' in raw)) {
+    throw new ProviderParseError('Model response for house matching must be a JSON object with a house_id key');
+  }
+  const { house_id } = raw;
+  if (house_id === null) {
+    return { houseId: null };
+  }
+  if (typeof house_id !== 'number' || !houses.some((house) => house.id === house_id)) {
+    throw new ProviderParseError(`house_id must be null or one of the provided house ids, got: ${house_id}`);
+  }
+  return { houseId: house_id };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: `PASS: providers/shared.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change (do not commit yet — held for review)**
+
+```bash
+git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
+```
+
+---
+
+### Task 19: OpenRouter adapter — `openRouterMatchHouseFromReply`
+
+**Files:**
+- Modify: `expense-intake/src/providers/openrouter.js`
+- Modify: `expense-intake/test/providers/openrouter.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/providers/openrouter.test.js`:
+
+```js
+import { openRouterParseExpense, openRouterGenerateSmsCopy, openRouterMatchHouseFromReply } from '../../src/providers/openrouter.js';
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: providers/openrouter.test.js');`:
+
+```js
+  // matchHouseFromReply: a confident match
+  const matchHouses = [
+    { id: 10, address: '123 Main St', nickname: 'Main St' },
+    { id: 11, address: '456 Oak Ave', nickname: null },
+  ];
+  const matchFetch = fakeFetch(chatResponse('{"house_id":10}'));
+  const matchResult = await openRouterMatchHouseFromReply({ apiKey: 'or_key', text: 'the main st one', houses: matchHouses, fetchImpl: matchFetch });
+  assert(matchResult.houseId === 10, 'openRouterMatchHouseFromReply must return the normalized matched house id');
+  const matchCall = matchFetch.calls[0];
+  assert(matchCall.url === 'https://openrouter.ai/api/v1/chat/completions', 'must hit the OpenRouter chat completions endpoint');
+  const matchBody = JSON.parse(matchCall.init.body);
+  assert(matchBody.messages[0].role === 'system' && matchBody.messages[0].content.includes('matching a text reply'), 'first message must be the match-house system prompt');
+  assert(matchBody.messages[1].content.includes('the main st one'), 'user message must carry the reply text');
+  assert(matchBody.temperature === 0, 'house matching must use temperature 0, same as parseExpense, for deterministic matching');
+
+  // matchHouseFromReply: no confident match
+  const noMatchFetch = fakeFetch(chatResponse('{"house_id":null}'));
+  const noMatchResult = await openRouterMatchHouseFromReply({ apiKey: 'or_key', text: 'what?', houses: matchHouses, fetchImpl: noMatchFetch });
+  assert(noMatchResult.houseId === null, 'openRouterMatchHouseFromReply must return houseId: null on no confident match');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/providers/openrouter.test.js`
+Expected: fails — `openRouterMatchHouseFromReply` is not yet exported from `../../src/providers/openrouter.js`.
+
+- [ ] **Step 3: Add the adapter function**
+
+Update the import at the top of `expense-intake/src/providers/openrouter.js`:
+
+```js
+import { PARSE_EXPENSE_SYSTEM_PROMPT, buildSmsCopyPrompt, extractJsonBlock, normalizeParseExpenseResult, MATCH_HOUSE_SYSTEM_PROMPT, buildMatchHouseUserMessage, normalizeMatchHouseResult } from './shared.js';
+```
+
+Append at the bottom of the file:
+
+```js
+
+export async function openRouterMatchHouseFromReply({ apiKey, text, houses, fetchImpl }) {
+  const messages = [
+    { role: 'system', content: MATCH_HOUSE_SYSTEM_PROMPT },
+    { role: 'user', content: buildMatchHouseUserMessage(text, houses) },
+  ];
+  const content = await openRouterChatCompletion({ apiKey, messages, temperature: 0, fetchImpl });
+  return normalizeMatchHouseResult(extractJsonBlock(content), houses);
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/providers/openrouter.test.js`
+Expected: `PASS: providers/openrouter.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/providers/openrouter.js expense-intake/test/providers/openrouter.test.js
+```
+
+---
+
+### Task 20: Anthropic adapter — `anthropicMatchHouseFromReply`
+
+**Files:**
+- Modify: `expense-intake/src/providers/anthropic.js`
+- Modify: `expense-intake/test/providers/anthropic.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/providers/anthropic.test.js`:
+
+```js
+import { anthropicParseExpense, anthropicGenerateSmsCopy, anthropicMatchHouseFromReply } from '../../src/providers/anthropic.js';
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: providers/anthropic.test.js');`:
+
+```js
+  // matchHouseFromReply: a confident match
+  const matchHouses = [
+    { id: 10, address: '123 Main St', nickname: 'Main St' },
+    { id: 11, address: '456 Oak Ave', nickname: null },
+  ];
+  const matchFetch = fakeFetch(messagesResponse('{"house_id":10}'));
+  const matchResult = await anthropicMatchHouseFromReply({ apiKey: 'sk-ant-key', text: 'the main st one', houses: matchHouses, fetchImpl: matchFetch });
+  assert(matchResult.houseId === 10, 'anthropicMatchHouseFromReply must return the normalized matched house id');
+  const matchCall = matchFetch.calls[0];
+  assert(matchCall.url === 'https://api.anthropic.com/v1/messages', 'must hit the Anthropic native Messages endpoint');
+  const matchBody = JSON.parse(matchCall.init.body);
+  assert(matchBody.system.includes('matching a text reply'), 'system field must carry the match-house system prompt');
+  assert(matchBody.messages[0].content.includes('the main st one'), 'user message must carry the reply text');
+  assert(matchBody.temperature === 0, 'house matching must use temperature 0, same as parseExpense, for deterministic matching');
+
+  // matchHouseFromReply: no confident match
+  const noMatchFetch = fakeFetch(messagesResponse('{"house_id":null}'));
+  const noMatchResult = await anthropicMatchHouseFromReply({ apiKey: 'sk-ant-key', text: 'what?', houses: matchHouses, fetchImpl: noMatchFetch });
+  assert(noMatchResult.houseId === null, 'anthropicMatchHouseFromReply must return houseId: null on no confident match');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/providers/anthropic.test.js`
+Expected: fails — `anthropicMatchHouseFromReply` is not yet exported from `../../src/providers/anthropic.js`.
+
+- [ ] **Step 3: Add the adapter function**
+
+Update the import at the top of `expense-intake/src/providers/anthropic.js`:
+
+```js
+import { PARSE_EXPENSE_SYSTEM_PROMPT, buildSmsCopyPrompt, extractJsonBlock, normalizeParseExpenseResult, MATCH_HOUSE_SYSTEM_PROMPT, buildMatchHouseUserMessage, normalizeMatchHouseResult } from './shared.js';
+```
+
+Append at the bottom of the file:
+
+```js
+
+export async function anthropicMatchHouseFromReply({ apiKey, text, houses, fetchImpl }) {
+  const messages = [{ role: 'user', content: buildMatchHouseUserMessage(text, houses) }];
+  const content = await anthropicMessagesRequest({ apiKey, system: MATCH_HOUSE_SYSTEM_PROMPT, messages, temperature: 0, fetchImpl });
+  return normalizeMatchHouseResult(extractJsonBlock(content), houses);
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/providers/anthropic.test.js`
+Expected: `PASS: providers/anthropic.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/providers/anthropic.js expense-intake/test/providers/anthropic.test.js
+```
+
+---
+
+### Task 21: Provider selector — `matchHouseFromReply` dispatch
+
+**Files:**
+- Modify: `expense-intake/src/providers/index.js`
+- Modify: `expense-intake/test/providers/index.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/providers/index.test.js`:
+
+```js
+import { parseExpense, generateSmsCopy, matchHouseFromReply } from '../../src/providers/index.js';
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: providers/index.test.js');`:
+
+```js
+  // matchHouseFromReply routes the same way (default -> OpenRouter)
+  const matchHouses = [{ id: 10, address: '123 Main St', nickname: 'Main St' }];
+  const matchDefaultFetch = fakeFetch({ choices: [{ message: { content: '{"house_id":10}' } }] });
+  const matchDefault = await matchHouseFromReply({ text: 'the main st one', houses: matchHouses }, {
+    OPENROUTER_API_KEY: 'or_key', ANTHROPIC_API_KEY: 'ant_key',
+  }, { fetchImpl: matchDefaultFetch });
+  assert(matchDefaultFetch.calls[0].url === 'https://openrouter.ai/api/v1/chat/completions', 'unset AI_PROVIDER must default matchHouseFromReply to OpenRouter');
+  assert(matchDefault.houseId === 10, 'matchHouseFromReply must return the normalized result regardless of provider');
+
+  // matchHouseFromReply routes to Anthropic when AI_PROVIDER=anthropic
+  const matchAntFetch = fakeFetch({ content: [{ type: 'text', text: '{"house_id":null}' }] });
+  const matchAnt = await matchHouseFromReply({ text: 'huh?', houses: matchHouses }, {
+    AI_PROVIDER: 'anthropic', OPENROUTER_API_KEY: 'or_key', ANTHROPIC_API_KEY: 'ant_key',
+  }, { fetchImpl: matchAntFetch });
+  assert(matchAntFetch.calls[0].url === 'https://api.anthropic.com/v1/messages', 'AI_PROVIDER=anthropic must route matchHouseFromReply to the Anthropic direct adapter');
+  assert(matchAnt.houseId === null, 'matchHouseFromReply must return houseId: null on no match regardless of provider');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/providers/index.test.js`
+Expected: fails — `matchHouseFromReply` is not yet exported from `../../src/providers/index.js`.
+
+- [ ] **Step 3: Add the selector function**
+
+Replace `expense-intake/src/providers/index.js` in full:
+
+```js
+import { openRouterParseExpense, openRouterGenerateSmsCopy, openRouterMatchHouseFromReply } from './openrouter.js';
+import { anthropicParseExpense, anthropicGenerateSmsCopy, anthropicMatchHouseFromReply } from './anthropic.js';
+
+export async function parseExpense(input = {}, env, deps = {}) {
+  const { text, image } = input;
+  const fetchImpl = deps.fetchImpl;
+  // Anything other than the exact string 'anthropic' — including unset, or a case/typo mismatch — falls back to openrouter. Intentional per spec; not a bug.
+  if (env.AI_PROVIDER === 'anthropic') {
+    return anthropicParseExpense({ apiKey: env.ANTHROPIC_API_KEY, text, image, fetchImpl });
+  }
+  return openRouterParseExpense({ apiKey: env.OPENROUTER_API_KEY, text, image, fetchImpl });
+}
+
+export async function generateSmsCopy(type, vars, env, deps = {}) {
+  const fetchImpl = deps.fetchImpl;
+  // Anything other than the exact string 'anthropic' — including unset, or a case/typo mismatch — falls back to openrouter. Intentional per spec; not a bug.
+  if (env.AI_PROVIDER === 'anthropic') {
+    return anthropicGenerateSmsCopy({ apiKey: env.ANTHROPIC_API_KEY, type, vars, fetchImpl });
+  }
+  return openRouterGenerateSmsCopy({ apiKey: env.OPENROUTER_API_KEY, type, vars, fetchImpl });
+}
+
+export async function matchHouseFromReply({ text, houses }, env, deps = {}) {
+  const fetchImpl = deps.fetchImpl;
+  // Same fallback rule as parseExpense/generateSmsCopy above — anything other than the exact string 'anthropic' routes to openrouter.
+  if (env.AI_PROVIDER === 'anthropic') {
+    return anthropicMatchHouseFromReply({ apiKey: env.ANTHROPIC_API_KEY, text, houses, fetchImpl });
+  }
+  return openRouterMatchHouseFromReply({ apiKey: env.OPENROUTER_API_KEY, text, houses, fetchImpl });
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/providers/index.test.js`
+Expected: `PASS: providers/index.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/providers/index.js expense-intake/test/providers/index.test.js
+```
+
+---
+
+### Task 22: D1 migration for `sheet_row` + new query helpers
+
+**Files:**
+- Create: `expense-intake/migrations/0002_add_sheet_row.sql`
+- Create: `expense-intake/test/migration-0002.test.js`
+- Modify: `expense-intake/src/db.js`
+- Modify: `expense-intake/test/db.test.js` (full replacement)
+- Modify: `expense-intake/test/run-all.js`
+
+- [ ] **Step 1: Write the failing tests**
+
+```sql
+-- This is what expense-intake/migrations/0002_add_sheet_row.sql must eventually contain —
+-- write test/migration-0002.test.js first, per TDD, to check for it before it exists.
+```
+
+```js
+// expense-intake/test/migration-0002.test.js
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const migrationPath = path.join(__dirname, '..', 'migrations', '0002_add_sheet_row.sql');
+
+async function main() {
+  assert(fs.existsSync(migrationPath), 'migrations/0002_add_sheet_row.sql missing');
+  const sql = fs.readFileSync(migrationPath, 'utf8');
+  assert(/ALTER TABLE expenses ADD COLUMN sheet_row INTEGER/.test(sql), 'migration must add an INTEGER sheet_row column to expenses, needed to delete/move the Sheet row on a house correction');
+
+  console.log('PASS: migration-0002.test.js');
+}
+
+await main();
+```
+
+Replace `expense-intake/test/db.test.js` in full:
+
+```js
+import {
+  findClientByTwilioNumber,
+  findAuthorizedSender,
+  findHousesForClient,
+  insertExpense,
+  insertPendingReview,
+  findPendingReviewById,
+  deletePendingReview,
+  findExpenseById,
+  updateExpenseHouse,
+} from '../src/db.js';
+import { createFakeD1 } from './fake-d1.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+async function main() {
+  // findClientByTwilioNumber
+  const clientRow = { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' };
+  const db1 = createFakeD1({
+    'SELECT * FROM clients WHERE twilio_number = ?': clientRow,
+  });
+  const client = await findClientByTwilioNumber(db1, '+15559876543');
+  assert(client === clientRow, 'findClientByTwilioNumber must return the row from the fake DB');
+  assert(db1.calls[0].params[0] === '+15559876543', 'must bind the Twilio number as the query parameter');
+
+  // findClientByTwilioNumber: not found
+  const db2 = createFakeD1({ 'SELECT * FROM clients WHERE twilio_number = ?': null });
+  const missingClient = await findClientByTwilioNumber(db2, '+10000000000');
+  assert(missingClient === null, 'findClientByTwilioNumber must return null when no client matches');
+
+  // findAuthorizedSender
+  const senderRow = { id: 5, client_id: 1, phone_number: '+15551234567' };
+  const db3 = createFakeD1({
+    'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': senderRow,
+  });
+  const sender = await findAuthorizedSender(db3, 1, '+15551234567');
+  assert(sender === senderRow, 'findAuthorizedSender must return the row from the fake DB');
+  assert(db3.calls[0].params[0] === 1 && db3.calls[0].params[1] === '+15551234567', 'must bind clientId then phoneNumber, in that order');
+
+  // findHousesForClient
+  const houseRows = [{ id: 10, client_id: 1, address: '123 Main St' }, { id: 11, client_id: 1, address: '456 Oak Ave' }];
+  const db4 = createFakeD1({
+    'SELECT * FROM houses WHERE client_id = ?': houseRows,
+  });
+  const houses = await findHousesForClient(db4, 1);
+  assert(houses === houseRows, 'findHousesForClient must return the results array from the fake DB');
+  assert(db4.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
+
+  // findHousesForClient: none found
+  const db5 = createFakeD1({ 'SELECT * FROM houses WHERE client_id = ?': [] });
+  const noHouses = await findHousesForClient(db5, 999);
+  assert(Array.isArray(noHouses) && noHouses.length === 0, 'findHousesForClient must return an empty array when the client has no houses');
+
+  // insertExpense: now binds 11 params (adds sheet_row) and returns the new row's id
+  const db6 = createFakeD1();
+  const newExpenseId = await insertExpense(db6, {
+    houseId: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials',
+    confidence: 0.9, photoR2Key: 'receipts/x/1.jpg', rawText: 'HD $42.50', loggedByPhone: '+15551234567', notes: '', sheetRow: 5,
+  });
+  const insertCall = db6.calls[0];
+  assert(insertCall.sql.includes('INSERT INTO expenses'), 'insertExpense must INSERT into the expenses table');
+  assert(insertCall.params[0] === 10 && insertCall.params[1] === '2026-08-17' && insertCall.params[4] === 'Materials', 'must bind house_id, date, and category in the expected column order');
+  assert(
+    JSON.stringify(insertCall.params) === JSON.stringify([
+      10, '2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, 'receipts/x/1.jpg', 'HD $42.50', '+15551234567', '', 5,
+    ]),
+    'insertExpense must bind all 11 params (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, notes, sheet_row) in exact column order'
+  );
+  assert(newExpenseId === 1, "insertExpense must return the new row's id from result.meta.last_row_id");
+
+  // insertExpense: notes defaults to empty string and sheet_row defaults to null when omitted
+  const db7 = createFakeD1();
+  await insertExpense(db7, {
+    houseId: 10, date: '2026-08-17', vendor: null, amount: null, category: 'Other',
+    confidence: 0.2, photoR2Key: null, rawText: '', loggedByPhone: '+15551234567',
+  });
+  assert(db7.calls[0].params[9] === '', 'insertExpense must default a missing notes value to an empty string, not undefined');
+  assert(
+    JSON.stringify(db7.calls[0].params) === JSON.stringify([
+      10, '2026-08-17', null, null, 'Other', 0.2, null, '', '+15551234567', '', null,
+    ]),
+    'insertExpense must bind all 11 params correctly even when vendor/amount/photoR2Key/sheet_row are null and notes is omitted'
+  );
+
+  // insertPendingReview: now returns the new row's id
+  const db8 = createFakeD1();
+  const newPendingId = await insertPendingReview(db8, {
+    clientId: 1, houseId: null, amountGuess: null, categoryGuess: null,
+    photoR2Key: 'receipts/x/2.jpg', rawText: 'unclear', confidence: 0, expiresAt: '2026-10-16T00:00:00.000Z',
+  });
+  const pendingCall = db8.calls[0];
+  assert(pendingCall.sql.includes('INSERT INTO pending_review'), 'insertPendingReview must INSERT into the pending_review table');
+  assert(pendingCall.params[0] === 1 && pendingCall.params[1] === null, 'must bind client_id and a null house_id when the house is ambiguous');
+  assert(
+    JSON.stringify(pendingCall.params) === JSON.stringify([
+      1, null, null, null, 'receipts/x/2.jpg', 'unclear', 0, '2026-10-16T00:00:00.000Z',
+    ]),
+    'insertPendingReview must bind all 8 params (client_id, house_id, amount_guess, category_guess, photo_r2_key, raw_text, confidence, expires_at) in exact column order'
+  );
+  assert(newPendingId === 1, "insertPendingReview must return the new row's id from result.meta.last_row_id");
+
+  // findPendingReviewById
+  const pendingRow = { id: 99, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.95 };
+  const db9 = createFakeD1({ 'SELECT * FROM pending_review WHERE id = ?': pendingRow });
+  const foundPending = await findPendingReviewById(db9, 99);
+  assert(foundPending === pendingRow, 'findPendingReviewById must return the row from the fake DB');
+  assert(db9.calls[0].params[0] === 99, 'must bind the pending_review id as the query parameter');
+
+  // deletePendingReview
+  const db10 = createFakeD1();
+  await deletePendingReview(db10, 99);
+  assert(db10.calls[0].sql.includes('DELETE FROM pending_review'), 'deletePendingReview must DELETE from the pending_review table');
+  assert(db10.calls[0].params[0] === 99, 'must bind the pending_review id to delete');
+
+  // findExpenseById
+  const expenseRow = { id: 42, house_id: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, photo_r2_key: 'receipts/x/1.jpg', raw_text: 'HD $42.50', logged_by_phone: '+15551234567', notes: '', sheet_row: 5 };
+  const db11 = createFakeD1({ 'SELECT * FROM expenses WHERE id = ?': expenseRow });
+  const foundExpense = await findExpenseById(db11, 42);
+  assert(foundExpense === expenseRow, 'findExpenseById must return the row from the fake DB');
+  assert(db11.calls[0].params[0] === 42, 'must bind the expense id as the query parameter');
+
+  // updateExpenseHouse
+  const db12 = createFakeD1();
+  await updateExpenseHouse(db12, { expenseId: 42, houseId: 11, sheetRow: 8 });
+  assert(db12.calls[0].sql.includes('UPDATE expenses SET house_id'), "updateExpenseHouse must UPDATE the expenses table's house_id (and sheet_row)");
+  assert(
+    JSON.stringify(db12.calls[0].params) === JSON.stringify([11, 8, 42]),
+    'updateExpenseHouse must bind house_id, sheet_row, then the expense id (matching the SET ... WHERE id = ? clause order)'
+  );
+
+  console.log('PASS: db.test.js');
+}
+
+await main();
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/migration-0002.test.js`
+Expected: fails with `Error: migrations/0002_add_sheet_row.sql missing`
+
+Run: `node expense-intake/test/db.test.js`
+Expected: fails — `findPendingReviewById`/`deletePendingReview`/`findExpenseById`/`updateExpenseHouse` are not exported yet, and `insertExpense`'s param-count assertion fails against the current 10-param implementation.
+
+- [ ] **Step 3: Write the migration and the db.js additions**
+
+```sql
+-- expense-intake/migrations/0002_add_sheet_row.sql
+
+ALTER TABLE expenses ADD COLUMN sheet_row INTEGER;
+```
+
+Replace `expense-intake/src/db.js` in full:
+
+```js
+// expense-intake/src/db.js
+
+export async function findClientByTwilioNumber(db, twilioNumber) {
+  return db.prepare('SELECT * FROM clients WHERE twilio_number = ?').bind(twilioNumber).first();
+}
+
+export async function findAuthorizedSender(db, clientId, phoneNumber) {
+  return db.prepare('SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?').bind(clientId, phoneNumber).first();
+}
+
+export async function findHousesForClient(db, clientId) {
+  const result = await db.prepare('SELECT * FROM houses WHERE client_id = ?').bind(clientId).all();
+  return result.results;
+}
+
+export async function insertExpense(db, { houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone, notes, sheetRow }) {
+  const result = await db
+    .prepare('INSERT INTO expenses (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, notes, sheet_row) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone, notes || '', sheetRow ?? null)
+    .run();
+  return result.meta.last_row_id;
+}
+
+export async function insertPendingReview(db, { clientId, houseId, amountGuess, categoryGuess, photoR2Key, rawText, confidence, expiresAt }) {
+  const result = await db
+    .prepare('INSERT INTO pending_review (client_id, house_id, amount_guess, category_guess, photo_r2_key, raw_text, confidence, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(clientId, houseId, amountGuess, categoryGuess, photoR2Key, rawText, confidence, expiresAt)
+    .run();
+  return result.meta.last_row_id;
+}
+
+export async function findPendingReviewById(db, id) {
+  return db.prepare('SELECT * FROM pending_review WHERE id = ?').bind(id).first();
+}
+
+export async function deletePendingReview(db, id) {
+  return db.prepare('DELETE FROM pending_review WHERE id = ?').bind(id).run();
+}
+
+export async function findExpenseById(db, id) {
+  return db.prepare('SELECT * FROM expenses WHERE id = ?').bind(id).first();
+}
+
+export async function updateExpenseHouse(db, { expenseId, houseId, sheetRow }) {
+  return db.prepare('UPDATE expenses SET house_id = ?, sheet_row = ? WHERE id = ?').bind(houseId, sheetRow, expenseId).run();
+}
+```
+
+- [ ] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './migration-0002.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './expense-flow.test.js';
+import './message-dedup.test.js';
+import './conversation-state.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+(`./conversation-state.test.js` doesn't exist yet — it's created in Task 24. Adding the import now would break this task's own verification, so leave it out of `run-all.js` until Task 24 and skip straight to `./handlers.test.js` after `./message-dedup.test.js` for now.)
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Validate the migration against real D1 SQLite (local emulation)**
+
+```bash
+cd expense-intake
+npx wrangler d1 execute expense-intake-db --local --file=migrations/0002_add_sheet_row.sql
+npx wrangler d1 execute expense-intake-db --local --command="PRAGMA table_info(expenses)"
+```
+
+Expected: no SQL errors; the second command's output includes a `sheet_row` column.
+
+- [ ] **Step 7: Stage the change**
+
+```bash
+git add expense-intake/migrations/0002_add_sheet_row.sql expense-intake/test/migration-0002.test.js expense-intake/src/db.js expense-intake/test/db.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 23: Sheets module — `extractAppendedRowNumber` and `deleteSheetRow`
+
+**Files:**
+- Modify: `expense-intake/src/sheets.js`
+- Modify: `expense-intake/test/sheets.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Replace `expense-intake/test/sheets.test.js` in full:
+
+```js
+// expense-intake/test/sheets.test.js
+import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow } from '../src/sheets.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function fakeFetch(ok, status, body) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    return { ok, status, json: async () => body };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+async function main() {
+  const okBody = { spreadsheetId: 'sheet123', updates: { updatedRows: 1 } };
+  const fetchImpl = fakeFetch(true, 200, okBody);
+  const row = ['2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, 'https://x/receipts/key.jpg', 'HD $42.50', '+15551234567', ''];
+
+  const result = await appendExpenseRow({ accessToken: 'ya29.token', spreadsheetId: 'sheet123', row, fetchImpl });
+  assert(result === okBody, 'appendExpenseRow must return the parsed response body');
+
+  const call = fetchImpl.calls[0];
+  assert(call.url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/sheet123/values/'), 'must hit the values:append endpoint for the given spreadsheetId');
+  assert(call.url.includes(':append'), 'must use the :append action');
+  assert(call.url.includes(encodeURIComponent('Sheet1!A:I')), 'must target the Sheet1!A:I range');
+  assert(call.url.includes('valueInputOption=USER_ENTERED'), "must use USER_ENTERED so numbers/dates are interpreted, not stored as literal text (required for the Tax Rollup tab's SUM to work)");
+  assert(call.url.includes('insertDataOption=INSERT_ROWS'), 'must use INSERT_ROWS so appending never overwrites existing data');
+  assert(call.init.headers.Authorization === 'Bearer ya29.token', 'must send the access token as a Bearer token');
+  const body = JSON.parse(call.init.body);
+  assert(Array.isArray(body.values) && body.values.length === 1 && JSON.stringify(body.values[0]) === JSON.stringify(row), 'must wrap the row in a single-row values array');
+
+  // error path
+  const failFetch = fakeFetch(false, 403, { error: { message: 'The caller does not have permission' } });
+  let threw = false;
+  try {
+    await appendExpenseRow({ accessToken: 'bad', spreadsheetId: 'sheet123', row, fetchImpl: failFetch });
+  } catch (err) {
+    threw = true;
+    assert(err.message === 'The caller does not have permission', 'must surface the Sheets API error message');
+  }
+  assert(threw, 'a non-2xx Sheets API response must throw');
+
+  // extractAppendedRowNumber: parses the row number out of a real append response shape
+  const rowNumber = extractAppendedRowNumber({ spreadsheetId: 'sheet123', updates: { updatedRange: 'Sheet1!A5:I5', updatedRows: 1 } });
+  assert(rowNumber === 5, 'extractAppendedRowNumber must parse the row number out of updatedRange');
+
+  // extractAppendedRowNumber: a multi-row append parses the starting row
+  const multiRowNumber = extractAppendedRowNumber({ updates: { updatedRange: 'Sheet1!A12:I14' } });
+  assert(multiRowNumber === 12, 'extractAppendedRowNumber must parse the starting row number for a multi-row range');
+
+  // extractAppendedRowNumber: missing updates.updatedRange throws
+  let threwMissingRange = false;
+  try {
+    extractAppendedRowNumber({ spreadsheetId: 'sheet123' });
+  } catch { threwMissingRange = true; }
+  assert(threwMissingRange, 'extractAppendedRowNumber must throw when updates.updatedRange is missing');
+
+  // deleteSheetRow
+  const deleteFetch = fakeFetch(true, 200, { spreadsheetId: 'sheet123', replies: [{}] });
+  await deleteSheetRow({ accessToken: 'ya29.token', spreadsheetId: 'sheet123', sheetRow: 5, fetchImpl: deleteFetch });
+  const deleteCall = deleteFetch.calls[0];
+  assert(deleteCall.url === 'https://sheets.googleapis.com/v4/spreadsheets/sheet123:batchUpdate', 'deleteSheetRow must hit the batchUpdate endpoint for the given spreadsheetId');
+  assert(deleteCall.init.headers.Authorization === 'Bearer ya29.token', 'deleteSheetRow must send the access token as a Bearer token');
+  const deleteBody = JSON.parse(deleteCall.init.body);
+  const deleteDimension = deleteBody.requests[0].deleteDimension;
+  assert(deleteDimension.range.sheetId === 0, 'deleteSheetRow must target the standard Sheet1 tab (gid 0)');
+  assert(deleteDimension.range.dimension === 'ROWS', 'deleteSheetRow must delete a row dimension, not columns');
+  assert(deleteDimension.range.startIndex === 4 && deleteDimension.range.endIndex === 5, 'deleteSheetRow must convert the 1-indexed sheetRow (5) to the 0-indexed, exclusive-end startIndex/endIndex (4, 5) the batchUpdate API expects');
+
+  // deleteSheetRow: error path
+  const deleteFailFetch = fakeFetch(false, 403, { error: { message: 'The caller does not have permission' } });
+  let threwDeleteError = false;
+  try {
+    await deleteSheetRow({ accessToken: 'bad', spreadsheetId: 'sheet123', sheetRow: 5, fetchImpl: deleteFailFetch });
+  } catch (err) {
+    threwDeleteError = true;
+    assert(err.message === 'The caller does not have permission', 'deleteSheetRow must surface the Sheets API error message');
+  }
+  assert(threwDeleteError, 'a non-2xx batchUpdate response must throw');
+
+  console.log('PASS: sheets.test.js');
+}
+
+await main();
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/sheets.test.js`
+Expected: fails — `extractAppendedRowNumber`/`deleteSheetRow` are not yet exported from `../src/sheets.js`.
+
+- [ ] **Step 3: Write the additions**
+
+Replace `expense-intake/src/sheets.js` in full:
+
+```js
+// expense-intake/src/sheets.js
+const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
+const APPEND_RANGE = 'Sheet1!A:I'; // fixed tab/column layout — onboarding (not yet built) is expected to create every house's Sheet with this same structure, per Step 4's design note
+const DEFAULT_SHEET_ID = 0; // gid of the standard "Sheet1" tab every house's spreadsheet is assumed to use — see Step 5's design spec
+
+export async function appendExpenseRow({ accessToken, spreadsheetId, row, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const range = encodeURIComponent(APPEND_RANGE);
+  const url = `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const response = await doFetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.error && data.error.message) || `Sheets API request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+// Parses the 1-indexed row number a row landed on out of an appendExpenseRow response's
+// updates.updatedRange (e.g. "Sheet1!A5:I5" -> 5), so it can be targeted for deletion later
+// if the client corrects which house an expense belongs to (Step 5).
+export function extractAppendedRowNumber(appendResponse) {
+  const range = appendResponse && appendResponse.updates && appendResponse.updates.updatedRange;
+  if (!range) {
+    throw new Error('Sheets append response missing updates.updatedRange');
+  }
+  const match = range.match(/![A-Z]+(\d+)/);
+  if (!match) {
+    throw new Error(`Could not parse a row number out of updatedRange: ${range}`);
+  }
+  return Number(match[1]);
+}
+
+export async function deleteSheetRow({ accessToken, spreadsheetId, sheetRow, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const url = `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const response = await doFetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      requests: [{
+        deleteDimension: {
+          range: { sheetId: DEFAULT_SHEET_ID, dimension: 'ROWS', startIndex: sheetRow - 1, endIndex: sheetRow },
+        },
+      }],
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.error && data.error.message) || `Sheets API request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/sheets.test.js`
+Expected: `PASS: sheets.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/sheets.js expense-intake/test/sheets.test.js
+```
+
+---
+
+### Task 24: Conversation-state module — `awaiting_house`/`correction` KV helpers
+
+**Files:**
+- Create: `expense-intake/src/conversation-state.js`
+- Create: `expense-intake/test/conversation-state.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [ ] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/conversation-state.test.js
+import {
+  getAwaitingHouse, setAwaitingHouse, clearAwaitingHouse,
+  getCorrectionState, setCorrectionState, clearCorrectionState,
+} from '../src/conversation-state.js';
+import { createFakeKV } from './fake-kv.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+async function main() {
+  // awaiting_house: not set
+  const kv1 = createFakeKV();
+  const missing = await getAwaitingHouse(kv1, '+15551234567');
+  assert(missing === null, 'getAwaitingHouse must return null when nothing is stored for this phone');
+
+  // awaiting_house: set then get, with a 10-minute TTL
+  const kv2 = createFakeKV();
+  await setAwaitingHouse(kv2, '+15551234567', { pendingReviewId: 99, attempt: 0 });
+  const putCall = kv2.calls.find((c) => c.method === 'put');
+  assert(putCall.key === 'awaiting_house:+15551234567', 'setAwaitingHouse must key by awaiting_house:<phone>');
+  assert(putCall.options.expirationTtl === 600, 'setAwaitingHouse must use a 10-minute (600s) TTL');
+  const state = await getAwaitingHouse(kv2, '+15551234567');
+  assert(state.pendingReviewId === 99 && state.attempt === 0, 'getAwaitingHouse must return the exact stored state, JSON round-tripped');
+
+  // awaiting_house: clear
+  const kv3 = createFakeKV();
+  await setAwaitingHouse(kv3, '+15551234567', { pendingReviewId: 1, attempt: 0 });
+  await clearAwaitingHouse(kv3, '+15551234567');
+  assert((await getAwaitingHouse(kv3, '+15551234567')) === null, 'clearAwaitingHouse must delete the stored state');
+
+  // correction: not set
+  const kv4 = createFakeKV();
+  const missingCorrection = await getCorrectionState(kv4, '+15551234567');
+  assert(missingCorrection === null, 'getCorrectionState must return null when nothing is stored for this phone');
+
+  // correction: set then get, with a 10-minute TTL
+  const kv5 = createFakeKV();
+  await setCorrectionState(kv5, '+15551234567', { expenseId: 42, houseId: 10, spreadsheetId: 'sheet_abc', sheetRow: 5 });
+  const correctionPutCall = kv5.calls.find((c) => c.method === 'put');
+  assert(correctionPutCall.key === 'correction:+15551234567', 'setCorrectionState must key by correction:<phone>');
+  assert(correctionPutCall.options.expirationTtl === 600, 'setCorrectionState must use a 10-minute (600s) TTL');
+  const correctionState = await getCorrectionState(kv5, '+15551234567');
+  assert(correctionState.expenseId === 42 && correctionState.sheetRow === 5, 'getCorrectionState must return the exact stored state, JSON round-tripped');
+
+  // correction: setting again for the same phone overwrites the previous state (the
+  // "always the most recent filed expense" rule from the design spec)
+  const kv6 = createFakeKV();
+  await setCorrectionState(kv6, '+15551234567', { expenseId: 1, houseId: 10, spreadsheetId: 'sheet_abc', sheetRow: 5 });
+  await setCorrectionState(kv6, '+15551234567', { expenseId: 2, houseId: 10, spreadsheetId: 'sheet_abc', sheetRow: 6 });
+  const latest = await getCorrectionState(kv6, '+15551234567');
+  assert(latest.expenseId === 2, 'a second setCorrectionState call for the same phone must overwrite the first');
+
+  // correction: clear
+  const kv7 = createFakeKV();
+  await setCorrectionState(kv7, '+15551234567', { expenseId: 1, houseId: 10, spreadsheetId: 'sheet_abc', sheetRow: 5 });
+  await clearCorrectionState(kv7, '+15551234567');
+  assert((await getCorrectionState(kv7, '+15551234567')) === null, 'clearCorrectionState must delete the stored state');
+
+  console.log('PASS: conversation-state.test.js');
+}
+
+await main();
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/conversation-state.test.js`
+Expected: fails with a module-not-found error for `../src/conversation-state.js` (it doesn't exist yet).
+
+- [ ] **Step 3: Write the module**
+
+```js
+// expense-intake/src/conversation-state.js
+// House-selection and correction-window state, both scoped by sender phone number and both
+// a 10-minute TTL — see Step 5's design spec
+// (docs/superpowers/specs/2026-08-18-expense-intake-house-selection-correction-design.md).
+// Shares the CONVERSATION_STATE KV namespace Step 4's message-dedup.js already introduced,
+// under different key prefixes, rather than a second namespace.
+const STATE_TTL_SECONDS = 10 * 60;
+
+export async function getAwaitingHouse(kv, phone) {
+  const value = await kv.get(`awaiting_house:${phone}`, { type: 'json' });
+  return value ?? null;
+}
+
+export async function setAwaitingHouse(kv, phone, state) {
+  await kv.put(`awaiting_house:${phone}`, JSON.stringify(state), { expirationTtl: STATE_TTL_SECONDS });
+}
+
+export async function clearAwaitingHouse(kv, phone) {
+  await kv.delete(`awaiting_house:${phone}`);
+}
+
+export async function getCorrectionState(kv, phone) {
+  const value = await kv.get(`correction:${phone}`, { type: 'json' });
+  return value ?? null;
+}
+
+export async function setCorrectionState(kv, phone, state) {
+  await kv.put(`correction:${phone}`, JSON.stringify(state), { expirationTtl: STATE_TTL_SECONDS });
+}
+
+export async function clearCorrectionState(kv, phone) {
+  await kv.delete(`correction:${phone}`);
+}
+```
+
+- [ ] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './migration-0002.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './expense-flow.test.js';
+import './message-dedup.test.js';
+import './conversation-state.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/conversation-state.js expense-intake/test/conversation-state.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 25: New SMS copy anchors — retry, give-up, correction-confirmed
+
+**Files:**
+- Modify: `expense-intake/src/providers/shared.js`
+- Modify: `expense-intake/test/providers/shared.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/providers/shared.test.js`, immediately after the existing `SMS_COPY_ANCHORS.monthly_nudge` assertion and before the `buildSmsCopyPrompt` section:
+
+```js
+  assert(SMS_COPY_ANCHORS.house_selection_retry.length === 2, 'house_selection_retry must have 2 tone anchors');
+  assert(SMS_COPY_ANCHORS.house_selection_giveup.length === 2, 'house_selection_giveup must have 2 tone anchors');
+  assert(SMS_COPY_ANCHORS.correction_confirmed.length === 2, 'correction_confirmed must have 2 tone anchors');
+```
+
+Insert this block into `main()`, immediately before the Task 18 additions (i.e. right before `console.log('PASS: providers/shared.test.js');`):
+
+```js
+  // buildSmsCopyPrompt must work for each of the three new Step 5 types too (reuses the
+  // same generic machinery already exercised above for confirmation/house_selection/etc.)
+  const retryPrompt = buildSmsCopyPrompt('house_selection_retry', { house_list: '123 Main St or the Duplex' });
+  assert(retryPrompt.user.includes('house_list: 123 Main St or the Duplex'), 'house_selection_retry prompt must carry the actual house list value');
+  const giveupPrompt = buildSmsCopyPrompt('house_selection_giveup', {});
+  assert(giveupPrompt.system.includes('saved'), 'house_selection_giveup prompt must include its tone anchors');
+  const correctionPrompt = buildSmsCopyPrompt('correction_confirmed', { house: '456 Oak Ave' });
+  assert(correctionPrompt.user.includes('house: 456 Oak Ave'), 'correction_confirmed prompt must carry the actual house value');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: fails — `SMS_COPY_ANCHORS.house_selection_retry` (and the other two) are `undefined`.
+
+- [ ] **Step 3: Add the new anchors**
+
+In `expense-intake/src/providers/shared.js`, add three keys to `SMS_COPY_ANCHORS`, immediately after `monthly_nudge`:
+
+```js
+  house_selection_retry: [
+    "Sorry, didn't catch that — is this for [house_list]?",
+    'Just to confirm, which one is it: [house_list]?',
+  ],
+  house_selection_giveup: [
+    'No worries — saved this one for you to sort out later.',
+    'Got it, saved for manual review — no rush.',
+  ],
+  correction_confirmed: [
+    'Updated — moved to [house]. Thanks for the heads up.',
+    'Fixed, now logged under [house].',
+  ],
+```
+
+(`buildSmsCopyPrompt` already handles any type present in `SMS_COPY_ANCHORS` generically — no other code change is needed for these three new types to work.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/providers/shared.test.js`
+Expected: `PASS: providers/shared.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
+```
+
+---
+
+### Task 26: `fileExpense` extraction + house-selection resolution + correction-window wiring
+
+**Files:**
+- Modify: `expense-intake/src/expense-flow.js` (full replacement)
+- Modify: `expense-intake/test/expense-flow.test.js` (full replacement)
+
+This is the integration task: it extracts the `fileExpense` helper (used by both the normal auto-file path and Feature 1's house-selection resolution), and wires the `awaiting_house`/`correction` checks into `processExpenseMessage`'s routing order, per the Design decisions above.
+
+- [ ] **Step 1: Write the failing tests**
+
+Replace `expense-intake/test/expense-flow.test.js` in full:
+
+```js
+// expense-intake/test/expense-flow.test.js
+import crypto from 'node:crypto';
+import { processExpenseMessage } from '../src/expense-flow.js';
+import { createFakeD1 } from './fake-d1.js';
+import { createFakeR2Bucket } from './fake-r2.js';
+import { createFakeKV } from './fake-kv.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function generateTestServiceAccount() {
+  const { privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  return { client_email: 'test-sa@test.iam.gserviceaccount.com', private_key: privateKey };
+}
+
+function chatResponse(content) {
+  return { choices: [{ message: { content } }] };
+}
+
+function dispatchFetch(handlers) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    for (const [match, respond] of handlers) {
+      if (url.includes(match)) return respond(url, init);
+    }
+    throw new Error(`Unhandled fetch in test: ${url}`);
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+function jsonOk(body) {
+  return async () => ({ ok: true, status: 200, json: async () => body });
+}
+
+async function withStoredPhoto(bucket, key) {
+  await bucket.put(key, new ArrayBuffer(4), { httpMetadata: { contentType: 'image/jpeg' } });
+}
+
+function baseEnv(db, bucket, overrides = {}) {
+  return {
+    DB: db,
+    RECEIPTS_BUCKET: bucket,
+    CONVERSATION_STATE: createFakeKV(),
+    AI_PROVIDER: 'openrouter',
+    OPENROUTER_API_KEY: 'or_key',
+    GOOGLE_SERVICE_ACCOUNT_JSON: generateTestServiceAccount(),
+    WORKER_BASE_URL: 'https://expense-intake.example.workers.dev',
+    ...overrides,
+  };
+}
+
+function openRouterHandler(parseContent, copyContent) {
+  return async (url, init) => {
+    const body = JSON.parse(init.body);
+    const isParse = body.messages.some((m) => Array.isArray(m.content));
+    const content = isParse ? parseContent : copyContent;
+    return { ok: true, status: 200, json: async () => chatResponse(content) };
+  };
+}
+
+// Distinguishes OpenRouter calls by the actual system prompt text (all three of
+// parseExpense/matchHouseFromReply/generateSmsCopy send a plain-string system prompt, so
+// they can be told apart even though matchHouseFromReply and generateSmsCopy calls otherwise
+// look identical in shape). Used only by the Step 5 scenarios below, which exercise more
+// than two of these call types in a single test.
+function openRouterRouter({ parse, match, copy }) {
+  return async (url, init) => {
+    const body = JSON.parse(init.body);
+    const system = body.messages[0].content;
+    let content = copy;
+    if (typeof system === 'string' && system.includes('expense-parsing assistant')) content = parse;
+    else if (typeof system === 'string' && system.includes('matching a text reply')) content = match;
+    return { ok: true, status: 200, json: async () => chatResponse(content) };
+  };
+}
+
+async function main() {
+  const client = { id: 1, twilio_number: '+15559876543' };
+  const sender = { id: 5, client_id: 1, phone_number: '+15551234567' };
+  const singleHouse = [{ id: 10, client_id: 1, address: '123 Main St', nickname: 'Main St', google_sheet_id: 'sheet_abc' }];
+
+  // 1. Happy path: single house, high confidence, photo message
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    await withStoredPhoto(bucket, 'receipts/x/1.jpg');
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '', media: [] },
+      photoR2Key: 'receipts/x/1.jpg',
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a high-confidence happy path must produce a confirmation SMS body');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'a high-confidence match must insert an expenses row');
+    assert(expenseInsert.params[4] === 'Materials', 'the inserted expense must carry the parsed category');
+    const sheetsCall = fetchImpl.calls.find((c) => c.url.includes('sheets.googleapis.com'));
+    assert(sheetsCall, 'a high-confidence match must append a row to the house Sheet');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(!pendingInsert, 'a high-confidence match must not also write to pending_review');
+  }
+
+  // 2. Low confidence: single house, low-confidence parse -> pending_review, not expenses
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: null, amount: null, category: 'Other', confidence: 0.2, raw_text: 'blurry' }),
+        'Saved under Other — flagged for review.'
+      )],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'some note', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a low-confidence match must still produce an SMS body');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'a low-confidence match must write to pending_review');
+    assert(pendingInsert.params[1] === 10, 'a low-confidence match with a known house must still record that house_id in pending_review');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(!expenseInsert, 'a low-confidence match must not write to expenses');
+    const sheetsCall = fetchImpl.calls.find((c) => c.url.includes('sheets.googleapis.com'));
+    assert(!sheetsCall, 'a low-confidence match must not touch the Sheet');
+  }
+
+  // 2b. High confidence but null amount: single house, high-confidence parse with an unknown
+  // amount -> pending_review, not expenses (a confident category/vendor doesn't make an
+  // unreadable total safe to auto-file as $0.00)
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: null, category: 'Materials', confidence: 0.9, raw_text: 'torn receipt' }),
+        'Saved under Materials — flagged for review.'
+      )],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'torn receipt', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a high-confidence match with a null amount must still produce an SMS body');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'a high-confidence match with a null amount must fall through to pending_review');
+    assert(pendingInsert.params[1] === 10, 'a high-confidence match with a null amount and a known house must still record that house_id in pending_review');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(!expenseInsert, 'a high-confidence match with a null amount must not write to expenses');
+    const sheetsCall = fetchImpl.calls.find((c) => c.url.includes('sheets.googleapis.com'));
+    assert(!sheetsCall, 'a high-confidence match with a null amount must not touch the Sheet');
+  }
+
+  // 3. Ambiguous house (two houses): pending_review with house_id null, house_selection copy
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Lowes', amount: 10, category: 'Materials', confidence: 0.95, raw_text: 'Lowes $10' }),
+        'Which house is this for?'
+      )],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $10', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'an ambiguous house must still produce a prompt SMS body');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'an ambiguous house must write to pending_review even with high confidence');
+    assert(pendingInsert.params[1] === null, "an ambiguous house must record a null house_id, since we don't know which one");
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(!expenseInsert, 'an ambiguous house must never write directly to expenses, regardless of confidence');
+  }
+
+  // 4. Unknown client: silent ack, no writes
+  {
+    const db = createFakeD1({ 'SELECT * FROM clients WHERE twilio_number = ?': null });
+    const bucket = createFakeR2Bucket();
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+10000000000', body: 'hi', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: {},
+    });
+    assert(result.smsBody === '', 'an unrecognized Twilio "To" number must produce a silent (empty) acknowledgment');
+    assert(db.calls.length === 1, 'an unknown client must not proceed past the initial client lookup');
+  }
+
+  // 5. Unauthorized sender: silent ack
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': null,
+    });
+    const bucket = createFakeR2Bucket();
+    const result = await processExpenseMessage({
+      fields: { from: '+19998887777', to: '+15559876543', body: 'hi', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: {},
+    });
+    assert(result.smsBody === '', 'an unauthorized sender must produce a silent (empty) acknowledgment');
+  }
+
+  // 6. Empty message (no body, no photo): silent ack, no D1 lookups at all
+  {
+    const db = createFakeD1();
+    const bucket = createFakeR2Bucket();
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: {},
+    });
+    assert(result.smsBody === '', 'a genuinely empty message must produce a silent acknowledgment');
+    assert(db.calls.length === 0, 'a genuinely empty message must short-circuit before any D1 lookups');
+  }
+
+  // 7. Parse failure: treated as confidence 0, routed to pending_review
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+        }
+        return { ok: true, status: 200, json: async () => chatResponse('Saved under Uncategorized — flagged for review.') };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'something', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a parse failure must still produce a low-confidence-style SMS body, not crash the whole message');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'a parse failure must fall back to pending_review');
+    assert(pendingInsert.params[6] === 0, 'a parse failure must record confidence 0, not a fabricated value');
+  }
+
+  // 8. Missing google_sheet_id on the resolved house: throws (a config gap, not silently swallowed)
+  {
+    const houseWithoutSheet = [{ id: 12, client_id: 1, address: '789 Pine Rd', nickname: null, google_sheet_id: null }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': houseWithoutSheet,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'X', amount: 1, category: 'Other', confidence: 0.99, raw_text: 'X $1' }),
+        'unused'
+      )],
+    ]);
+    let threw = false;
+    try {
+      await processExpenseMessage({
+        fields: { from: '+15551234567', to: '+15559876543', body: 'X $1', media: [] },
+        photoR2Key: null,
+        env: baseEnv(db, bucket),
+        deps: { fetchImpl },
+      });
+    } catch (err) {
+      threw = true;
+      assert(/google_sheet_id/.test(err.message), 'the error must clearly identify the missing google_sheet_id, not fail with a generic message');
+    }
+    assert(threw, 'a house with no Sheet configured must throw rather than silently losing a would-be-filed expense');
+  }
+
+  // 9. generateSmsCopy fails AFTER the write already succeeded (high confidence): the
+  // pipeline must still complete with fallback copy, not throw.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: true, status: 200, json: async () => chatResponse(JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' })) };
+        }
+        return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody === 'Logged: $42.50, Materials, Main St.', 'a generateSmsCopy failure after a successful write must fall back to static confirmation copy with the real values substituted, not throw');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'the write must have already succeeded before the copy-generation failure');
+  }
+
+  // 10. generateSmsCopy fails on the ambiguous-house (house_selection) path: must still
+  // fall back to static copy, and the pending_review write (house_id null) must have
+  // already happened.
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: true, status: 200, json: async () => chatResponse(JSON.stringify({ vendor: 'Lowes', amount: 10, category: 'Materials', confidence: 0.95, raw_text: 'Lowes $10' })) };
+        }
+        return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $10', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody === 'Which house is this for? Address or nickname works.', 'a generateSmsCopy failure on the ambiguous-house path must fall back to static house_selection copy, not throw');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'the pending_review write must have already succeeded before the copy-generation failure');
+    assert(pendingInsert.params[1] === null, 'the ambiguous-house pending_review write must still record a null house_id');
+  }
+
+  // 11. generateSmsCopy fails on the low-confidence path: must still fall back to static
+  // copy with the real category substituted, and the pending_review write must have already
+  // happened.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: true, status: 200, json: async () => chatResponse(JSON.stringify({ vendor: null, amount: null, category: 'Other', confidence: 0.2, raw_text: 'blurry' })) };
+        }
+        return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'some note', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody === "Logged this as Other but wasn't fully sure — flagged it for you to double check.", 'a generateSmsCopy failure on the low-confidence path must fall back to static low_confidence copy with the real category substituted, not throw');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'the pending_review write must have already succeeded before the copy-generation failure');
+  }
+
+  // 12. Ambiguous house also opens an awaiting_house KV window (Step 5, Feature 1 setup)
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Lowes', amount: 10, category: 'Materials', confidence: 0.95, raw_text: 'Lowes $10' }),
+        'Which house is this for?'
+      )],
+    ]);
+    await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $10', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    const state = await kv.get('awaiting_house:+15551234567', { type: 'json' });
+    assert(state && state.pendingReviewId === 1 && state.attempt === 0, 'an ambiguous house must open an awaiting_house KV window pointing at the new pending_review row, attempt 0');
+  }
+
+  // 13. A house-selection reply that matches resolves the pending item: files the expense
+  // (Sheet + expenses), deletes the pending_review row, clears awaiting_house, and opens a
+  // correction window for the newly-filed expense.
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const pendingRow = { id: 77, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.95 };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+      'SELECT * FROM pending_review WHERE id = ?': pendingRow,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'awaiting_house:+15551234567': JSON.stringify({ pendingReviewId: 77, attempt: 0 }) });
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":11}', copy: 'Logged: $10.00, Materials, 456 Oak Ave.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '456 Oak', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a resolved house-selection reply must produce a confirmation SMS body');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert && expenseInsert.params[0] === 11, 'the resolved pending item must be filed under the matched house');
+    const pendingDelete = db.calls.find((c) => c.sql.includes('DELETE FROM pending_review'));
+    assert(pendingDelete && pendingDelete.params[0] === 77, 'the resolved pending_review row must be deleted');
+    assert((await kv.get('awaiting_house:+15551234567')) === null, 'awaiting_house state must be cleared once resolved');
+    const correctionState = await kv.get('correction:+15551234567', { type: 'json' });
+    assert(correctionState && correctionState.houseId === 11, 'resolving a house-selection reply must open a correction window for the newly-filed expense');
+  }
+
+  // 14. A house-selection reply that doesn't match, on the first attempt, re-asks with the
+  // house list spelled out and bumps attempt to 1 — no file, no delete.
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'awaiting_house:+15551234567': JSON.stringify({ pendingReviewId: 77, attempt: 0 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":null}', copy: 'Sorry, is this for Main St or 456 Oak Ave?' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'not sure', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a first no-match must still produce a re-ask SMS body');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(!expenseInsert, 'a first no-match must not file anything');
+    const state = await kv.get('awaiting_house:+15551234567', { type: 'json' });
+    assert(state && state.attempt === 1 && state.pendingReviewId === 77, 'a first no-match must bump attempt to 1 and keep the same pendingReviewId');
+  }
+
+  // 15. A house-selection reply that doesn't match a second time gives up: clears
+  // awaiting_house, leaves the item in pending_review permanently (no delete call).
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'awaiting_house:+15551234567': JSON.stringify({ pendingReviewId: 77, attempt: 1 }) });
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":null}', copy: 'No worries, saved for review.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'still not sure', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a second no-match must still produce a give-up SMS body');
+    const pendingDelete = db.calls.find((c) => c.sql.includes('DELETE FROM pending_review'));
+    assert(!pendingDelete, 'a second no-match must leave the pending_review row in place for manual resolution');
+    assert((await kv.get('awaiting_house:+15551234567')) === null, 'a second no-match must clear awaiting_house so the client is not stuck being re-prompted forever');
+  }
+
+  // 16. A correction-window reply that matches a different house moves the expense: deletes
+  // the old Sheet row, appends to the new house's Sheet, updates expenses.house_id/sheet_row,
+  // and clears the correction window.
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const filedExpense = {
+      id: 42, house_id: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials',
+      confidence: 0.9, photo_r2_key: null, raw_text: 'HD $42.50', logged_by_phone: '+15551234567', notes: '', sheet_row: 5,
+    };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+      'SELECT * FROM expenses WHERE id = ?': filedExpense,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'correction:+15551234567': JSON.stringify({ expenseId: 42, houseId: 10, spreadsheetId: 'sheet_abc', sheetRow: 5 }) });
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', async (url, init) => {
+        if (url.includes(':batchUpdate')) return { ok: true, status: 200, json: async () => ({ replies: [{}] }) };
+        return { ok: true, status: 200, json: async () => ({ updates: { updatedRange: 'Sheet1!A2:I2' } }) };
+      }],
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":11}', copy: 'Updated — moved to 456 Oak Ave.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'wrong house, it was 456 Oak', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a matched correction must produce a confirmation SMS body');
+    const deleteCall = fetchImpl.calls.find((c) => c.url.includes(':batchUpdate'));
+    assert(deleteCall, 'a matched correction must delete the old Sheet row via batchUpdate');
+    const appendCall = fetchImpl.calls.find((c) => c.url.includes(':append'));
+    assert(appendCall, "a matched correction must append a new row to the new house's Sheet");
+    assert(appendCall.url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/sheet_def/'), 'the new row must be appended to the matched house\'s spreadsheet, not the original one');
+    const houseUpdate = db.calls.find((c) => c.sql.includes('UPDATE expenses SET house_id'));
+    assert(houseUpdate && JSON.stringify(houseUpdate.params) === JSON.stringify([11, 2, 42]), 'the expense row must be updated to the new house_id and new sheet_row');
+    assert((await kv.get('correction:+15551234567')) === null, 'a successful correction must clear the correction window — one correction per filed expense');
+  }
+
+  // 17. A correction-window reply that doesn't match any house is not a correction at all —
+  // it falls through and gets processed as a brand-new expense message, and the correction
+  // window ends up re-set to point at that new expense (fileExpense always opens a fresh
+  // correction window on every successful file, per the Design decisions above).
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const kv = createFakeKV({ 'correction:+15551234567': JSON.stringify({ expenseId: 42, houseId: 10, spreadsheetId: 'sheet_abc', sheetRow: 5 }) });
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ updates: { updatedRange: 'Sheet1!A3:I3' } })],
+      ['openrouter.ai', openRouterRouter({ match: '{"house_id":null}', parse: JSON.stringify({ vendor: 'Lowes', amount: 8, category: 'Materials', confidence: 0.9, raw_text: 'Lowes $8' }), copy: 'Logged: $8.00, Materials, Main St.' })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $8 for screws', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket, { CONVERSATION_STATE: kv }),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a non-matching correction-window reply must still produce a normal SMS body from the fallthrough processing');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'a non-matching correction-window reply must be processed as a new expense (high confidence, single house)');
+    const correctionState = await kv.get('correction:+15551234567', { type: 'json' });
+    assert(correctionState && correctionState.expenseId === 1, 'the correction window must be overwritten to point at the newly-filed expense, not left stale pointing at the old one');
+  }
+
+  console.log('PASS: expense-flow.test.js');
+}
+
+await main();
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/expense-flow.test.js`
+Expected: fails — `matchHouseFromReply` isn't imported/used by the current `expense-flow.js`, so scenarios 12-17 don't behave as asserted (e.g. no `awaiting_house` KV writes happen at all yet), and scenario 1 now needs `env.CONVERSATION_STATE` which the current `fileExpense`-less implementation never reads but the test's `baseEnv` now always provides — the failures will show up as the new scenario 12-17 assertions failing, not a crash.
+
+- [ ] **Step 3: Rewrite `src/expense-flow.js`**
+
+Replace `expense-intake/src/expense-flow.js` in full:
+
+```js
+// expense-intake/src/expense-flow.js
+import { parseExpense, generateSmsCopy, matchHouseFromReply } from './providers/index.js';
+import {
+  findClientByTwilioNumber, findAuthorizedSender, findHousesForClient,
+  insertExpense, insertPendingReview, findPendingReviewById, deletePendingReview,
+  findExpenseById, updateExpenseHouse,
+} from './db.js';
+import { getGoogleAccessToken } from './google-auth.js';
+import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow } from './sheets.js';
+import {
+  getAwaitingHouse, setAwaitingHouse, clearAwaitingHouse,
+  getCorrectionState, setCorrectionState, clearCorrectionState,
+} from './conversation-state.js';
+
+const CONFIDENCE_THRESHOLD = 0.7; // tunable — see Step 4's Design decisions note in the plan
+const PENDING_REVIEW_TTL_DAYS = 60; // matches spec's 60-day auto-purge (Cron Trigger is Build Order step 7)
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function pendingReviewExpiresAt() {
+  return new Date(Date.now() + PENDING_REVIEW_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function receiptPhotoUrl(baseUrl, photoR2Key) {
+  return `${baseUrl}/receipts/${encodeURIComponent(photoR2Key)}`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function loadStoredPhotoAsImageInput(bucket, photoR2Key) {
+  const object = await bucket.get(photoR2Key);
+  if (!object) {
+    throw new Error(`Stored receipt photo not found in R2: ${photoR2Key}`);
+  }
+  const bytes = await object.arrayBuffer();
+  return { base64: arrayBufferToBase64(bytes), mediaType: 'image/jpeg' };
+}
+
+function houseLabel(house) {
+  return house.nickname || house.address;
+}
+
+// Static fallback copy, used only if the AI copy-generation call itself fails. Deliberately
+// NOT the raw SMS_COPY_ANCHORS strings from providers/shared.js (Step 2) — those contain
+// literal bracket placeholders like "[amount]" meant only as few-shot prompt examples, never
+// meant to be sent to a client verbatim. These fallbacks substitute the real values instead.
+const FALLBACK_SMS_COPY = {
+  confirmation: (vars) => `Logged: $${vars.amount}, ${vars.category}, ${vars.house}.`,
+  low_confidence: (vars) => `Logged this as ${vars.category} but wasn't fully sure — flagged it for you to double check.`,
+  house_selection: () => 'Which house is this for? Address or nickname works.',
+  house_selection_retry: (vars) => `Sorry, could you confirm — is this for ${vars.house_list}?`,
+  house_selection_giveup: () => 'No worries — saved this one for you to sort out later.',
+  correction_confirmed: (vars) => `Updated — moved to ${vars.house}.`,
+};
+
+// A copy-generation failure must never re-trigger writes that already succeeded. By the
+// time this is called, the relevant write has already committed — if generateSmsCopy then
+// throws (rate limit, timeout, network blip, all realistic for an external API call) and
+// that exception were allowed to propagate, handleSmsWebhook's outer catch would turn it
+// into a 500, Twilio would retry the whole webhook, and — since nothing gets cached on a 500
+// (Task 16) — the retry would reprocess from scratch. Falling back to static copy instead
+// means the pipeline always finishes, gets cached, and Twilio never retries a message whose
+// writes already succeeded.
+async function safeGenerateSmsCopy(type, vars, env, deps) {
+  try {
+    return await generateSmsCopy(type, vars, env, deps);
+  } catch (err) {
+    console.error('generateSmsCopy failed, using fallback copy', { error: err.message, type });
+    // Defensive: FALLBACK_SMS_COPY only covers the types this module currently calls with.
+    // If a future call site invokes this with a type that hasn't been given a fallback
+    // entry, FALLBACK_SMS_COPY[type] is undefined — calling it would throw a TypeError from
+    // inside this catch block itself. A generic last-resort string keeps the guarantee
+    // unconditional.
+    const fallback = FALLBACK_SMS_COPY[type];
+    return fallback ? fallback(vars) : 'We logged this — reply if something looks off.';
+  }
+}
+
+// Writes an already-parsed, already-house-resolved expense to the house's Sheet + the
+// expenses table, and opens the 10-minute correction window for it. Shared by the normal
+// high-confidence auto-file path and by a house-selection reply that resolves a pending
+// item (Step 5) — both need the exact same write sequence.
+async function fileExpense({ house, parsed, fields, photoR2Key, env, deps }) {
+  if (!house.google_sheet_id) {
+    // A house with no Sheet set up is an onboarding gap, not a runtime parsing issue —
+    // surface it loudly (visible in wrangler tail) rather than silently losing the expense
+    // into pending_review, which would mask a real setup bug during manual (pre-step-9) onboarding.
+    throw new Error(`House ${house.id} has no google_sheet_id configured`);
+  }
+  const accessToken = await getGoogleAccessToken({ serviceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON, fetchImpl: deps.fetchImpl });
+  const photoUrl = photoR2Key ? receiptPhotoUrl(env.WORKER_BASE_URL, photoR2Key) : '';
+  const appendResponse = await appendExpenseRow({
+    accessToken,
+    spreadsheetId: house.google_sheet_id,
+    row: [todayIso(), parsed.vendor, parsed.amount, parsed.category, parsed.confidence, photoUrl, parsed.raw_text, fields.from, ''],
+    fetchImpl: deps.fetchImpl,
+  });
+  const sheetRow = extractAppendedRowNumber(appendResponse);
+  const expenseId = await insertExpense(env.DB, {
+    houseId: house.id,
+    date: todayIso(),
+    vendor: parsed.vendor,
+    amount: parsed.amount,
+    category: parsed.category,
+    confidence: parsed.confidence,
+    photoR2Key,
+    rawText: parsed.raw_text,
+    loggedByPhone: fields.from,
+    notes: '',
+    sheetRow,
+  });
+  await setCorrectionState(env.CONVERSATION_STATE, fields.from, {
+    expenseId,
+    houseId: house.id,
+    spreadsheetId: house.google_sheet_id,
+    sheetRow,
+  });
+  return safeGenerateSmsCopy('confirmation', {
+    amount: parsed.amount != null ? parsed.amount.toFixed(2) : '0.00',
+    category: parsed.category,
+    house: houseLabel(house),
+  }, env, deps);
+}
+
+// Resolves an in-flight house-selection prompt (Step 5, Feature 1). Always returns a
+// non-null SMS body — every branch here (match, retry, give-up) produces a reply.
+async function handleAwaitingHouseReply({ state, houses, fields, env, deps }) {
+  const { houseId } = await matchHouseFromReply({ text: fields.body, houses }, env, deps);
+
+  if (houseId != null) {
+    const house = houses.find((h) => h.id === houseId);
+    const pending = await findPendingReviewById(env.DB, state.pendingReviewId);
+    const parsed = {
+      vendor: null,
+      amount: pending.amount_guess,
+      category: pending.category_guess || 'Other',
+      confidence: pending.confidence,
+      raw_text: pending.raw_text,
+    };
+    const smsBody = await fileExpense({ house, parsed, fields, photoR2Key: pending.photo_r2_key, env, deps });
+    await deletePendingReview(env.DB, state.pendingReviewId);
+    await clearAwaitingHouse(env.CONVERSATION_STATE, fields.from);
+    return smsBody;
+  }
+
+  if (state.attempt === 0) {
+    await setAwaitingHouse(env.CONVERSATION_STATE, fields.from, { pendingReviewId: state.pendingReviewId, attempt: 1 });
+    const houseList = houses.map(houseLabel).join(' or ');
+    return safeGenerateSmsCopy('house_selection_retry', { house_list: houseList }, env, deps);
+  }
+
+  await clearAwaitingHouse(env.CONVERSATION_STATE, fields.from);
+  return safeGenerateSmsCopy('house_selection_giveup', {}, env, deps);
+}
+
+// Checks whether an inbound reply is a house correction for the most recently filed expense
+// (Step 5, Feature 2). Returns the SMS body to reply with if it is a correction, or `null` if
+// it isn't — a `null` return tells the caller to fall through to normal message processing,
+// and leaves the correction window's state untouched so it's still available for a later reply.
+async function tryApplyCorrection({ state, houses, fields, env, deps }) {
+  const { houseId } = await matchHouseFromReply({ text: fields.body, houses }, env, deps);
+  if (houseId == null) {
+    return null;
+  }
+
+  const newHouse = houses.find((h) => h.id === houseId);
+  if (!newHouse.google_sheet_id) {
+    throw new Error(`House ${newHouse.id} has no google_sheet_id configured`);
+  }
+  const expense = await findExpenseById(env.DB, state.expenseId);
+  const accessToken = await getGoogleAccessToken({ serviceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON, fetchImpl: deps.fetchImpl });
+
+  await deleteSheetRow({ accessToken, spreadsheetId: state.spreadsheetId, sheetRow: state.sheetRow, fetchImpl: deps.fetchImpl });
+
+  const photoUrl = expense.photo_r2_key ? receiptPhotoUrl(env.WORKER_BASE_URL, expense.photo_r2_key) : '';
+  const appendResponse = await appendExpenseRow({
+    accessToken,
+    spreadsheetId: newHouse.google_sheet_id,
+    row: [expense.date, expense.vendor, expense.amount, expense.category, expense.confidence, photoUrl, expense.raw_text, expense.logged_by_phone, expense.notes],
+    fetchImpl: deps.fetchImpl,
+  });
+  const newSheetRow = extractAppendedRowNumber(appendResponse);
+
+  await updateExpenseHouse(env.DB, { expenseId: state.expenseId, houseId: newHouse.id, sheetRow: newSheetRow });
+  await clearCorrectionState(env.CONVERSATION_STATE, fields.from);
+
+  return safeGenerateSmsCopy('correction_confirmed', { house: houseLabel(newHouse) }, env, deps);
+}
+
+export async function processExpenseMessage({ fields, photoR2Key, env, deps = {} }) {
+  if (!fields.body && !photoR2Key) {
+    return { smsBody: '' };
+  }
+
+  const client = await findClientByTwilioNumber(env.DB, fields.to);
+  if (!client) {
+    return { smsBody: '' };
+  }
+
+  const sender = await findAuthorizedSender(env.DB, client.id, fields.from);
+  if (!sender) {
+    return { smsBody: '' };
+  }
+
+  const houses = await findHousesForClient(env.DB, client.id);
+
+  // A reply's text is checked against any in-flight house-selection prompt or open
+  // correction window before it's treated as a brand-new expense message. A photo-only
+  // message (no body text) has nothing to match against a house name, so it always skips
+  // straight to normal processing — same as Step 4's existing empty-body-for-text handling.
+  if (fields.body) {
+    const awaitingHouse = await getAwaitingHouse(env.CONVERSATION_STATE, fields.from);
+    if (awaitingHouse) {
+      const smsBody = await handleAwaitingHouseReply({ state: awaitingHouse, houses, fields, env, deps });
+      return { smsBody };
+    }
+
+    const correctionState = await getCorrectionState(env.CONVERSATION_STATE, fields.from);
+    if (correctionState) {
+      const correctionSmsBody = await tryApplyCorrection({ state: correctionState, houses, fields, env, deps });
+      if (correctionSmsBody !== null) {
+        return { smsBody: correctionSmsBody };
+      }
+      // Not a correction after all — fall through and process it as a new message below.
+    }
+  }
+
+  const image = photoR2Key ? await loadStoredPhotoAsImageInput(env.RECEIPTS_BUCKET, photoR2Key) : null;
+
+  let parsed = null;
+  try {
+    parsed = await parseExpense({ text: fields.body || null, image }, env, deps);
+  } catch (err) {
+    console.error('parseExpense failed', { error: err.message });
+    parsed = null;
+  }
+
+  const houseIsAmbiguous = houses.length !== 1;
+
+  if (houseIsAmbiguous) {
+    const pendingReviewId = await insertPendingReview(env.DB, {
+      clientId: client.id,
+      houseId: null,
+      amountGuess: parsed ? parsed.amount : null,
+      categoryGuess: parsed ? parsed.category : null,
+      photoR2Key,
+      rawText: parsed ? parsed.raw_text : (fields.body || ''),
+      confidence: parsed ? parsed.confidence : 0,
+      expiresAt: pendingReviewExpiresAt(),
+    });
+    await setAwaitingHouse(env.CONVERSATION_STATE, fields.from, { pendingReviewId, attempt: 0 });
+    const smsBody = await safeGenerateSmsCopy('house_selection', {}, env, deps);
+    return { smsBody };
+  }
+
+  const house = houses[0];
+
+  if (parsed && parsed.confidence >= CONFIDENCE_THRESHOLD && parsed.amount != null) {
+    const smsBody = await fileExpense({ house, parsed, fields, photoR2Key, env, deps });
+    return { smsBody };
+  }
+
+  await insertPendingReview(env.DB, {
+    clientId: client.id,
+    houseId: house.id,
+    amountGuess: parsed ? parsed.amount : null,
+    categoryGuess: parsed ? parsed.category : null,
+    photoR2Key,
+    rawText: parsed ? parsed.raw_text : (fields.body || ''),
+    confidence: parsed ? parsed.confidence : 0,
+    expiresAt: pendingReviewExpiresAt(),
+  });
+  const smsBody = await safeGenerateSmsCopy('low_confidence', {
+    category: parsed ? parsed.category : 'Uncategorized',
+  }, env, deps);
+  return { smsBody };
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `node expense-intake/test/expense-flow.test.js`
+Expected: `PASS: expense-flow.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test.js
+```
+
+---
+
+### Task 27: Docs — README updates and Step 5 self-review
+
+**Files:**
+- Modify: `expense-intake/README.md`
+
+- [ ] **Step 1: Update the `## Routes` section**
+
+In `expense-intake/README.md`, replace the `POST /sms` bullet under `## Routes` with:
+
+```markdown
+- `POST /sms` — Twilio inbound SMS/MMS webhook. Validates `X-Twilio-Signature`,
+  stores any attached photo (resized/recompressed, only the first attached
+  photo is processed if a message has multiple) to R2, then either:
+  - resolves an in-flight house-selection prompt or an open 10-minute
+    correction window for that sender phone (Build Order step 5), or
+  - parses/categorizes the expense fresh, resolves the client and house,
+    and either files it to that house's Google Sheet + the `expenses`
+    table (high confidence, exactly one house) or holds it in
+    `pending_review` (low confidence, or an ambiguous house).
+
+  Every successfully filed expense opens a 10-minute correction window
+  (a reply naming a different house moves it); an ambiguous-house write
+  opens a house-selection prompt window (a reply naming a house files it,
+  a non-matching reply gets one re-ask before falling back to permanent
+  `pending_review`). A repeated Twilio delivery of a message already fully
+  processed (identified by `MessageSid`) replays the cached reply instead
+  of reprocessing.
+- `GET /receipts/:key` — serves a stored receipt photo directly from R2, no
+  authentication. Used by the "Photo" column link in each house's Sheet.
+```
+
+- [ ] **Step 2: Update the `## Status` section**
+
+Replace the `## Status` section with:
+
+```markdown
+## Status
+
+Build Order steps 1-5: repo scaffolding, D1 schema, the provider
+abstraction, the Twilio inbound webhook with R2 photo storage, the full
+happy-path pipeline (parse, categorize, file to Sheets/D1 or
+`pending_review`), Twilio-retry dedup protection, the interactive
+house-selection reply flow, and the 10-minute post-confirmation correction
+window. See
+`docs/superpowers/specs/2026-08-18-expense-intake-house-selection-correction-design.md`
+for the house-selection/correction design. Not yet built: the `pending`
+retrieval command for permanently-stuck ambiguous items (step 6), Cron
+Triggers for the daily purge and monthly nudge (step 7), save-contact
+onboarding (step 8), and the onboarding CLI script (step 9) — houses
+currently need a `google_sheet_id` set via manual SQL before the pipeline
+can file to their Sheet.
+```
+
+- [ ] **Step 3: Add a migration note to the `## D1 setup` section**
+
+Append to the end of the `## D1 setup (one-time, per environment)` section in `expense-intake/README.md`:
+
+```markdown
+
+Step 5 added a second migration for the `sheet_row` column (needed to
+delete/move a filed expense's Sheet row on a house correction):
+
+```bash
+npx wrangler d1 execute expense-intake-db --file=migrations/0002_add_sheet_row.sql          # remote
+npx wrangler d1 execute expense-intake-db --local --file=migrations/0002_add_sheet_row.sql  # local dev
+```
+```
+
+- [ ] **Step 4: Run the full suite one more time**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 5: Stage the change**
+
+```bash
+git add expense-intake/README.md
+```
+
+---
+
+## Self-Review — Step 5
+
+**Spec coverage for Step 5:** Design spec Feature 1 (house-selection resolution) → Task 18/19/20/21's `matchHouseFromReply` + Task 26's `handleAwaitingHouseReply`, covering the match/retry/give-up branches exactly as specified. Feature 2 (10-minute correction window) → Task 26's `tryApplyCorrection`, covering the match-and-move / no-match-falls-through branches. The shared AI matching primitive → Tasks 18-21 (one function, four files, mirroring Step 2's `parseExpense` pattern exactly). The `sheet_row` data model change and Sheets row deletion → Task 22 (migration) + Task 23 (`extractAppendedRowNumber`/`deleteSheetRow`). The `fileExpense` extraction → Task 26, used identically by the normal auto-file path and by house-selection resolution. The three new SMS copy types → Task 25. The routing order (`awaiting_house` before `correction` before normal flow) → Task 26's `processExpenseMessage`, matching the design spec's "Message routing order (final)" section exactly.
+
+**Not yet in scope, intentionally (later Build Order steps):** the `pending` retrieval command for items that exhaust house-selection retries (step 6) — a give-up leaves the item sitting in `pending_review` with no way to resolve it except manual SQL until step 6 exists. Cron Triggers (step 7), save-contact onboarding (step 8), and the onboarding CLI script (step 9, meaning `houses.google_sheet_id` must still be set by hand). Amount/category corrections remain out of scope per the design spec's explicit "wrong house only" decision.
+
+**Placeholder scan:** No TBD/TODO markers. No new secrets or bindings were introduced this step (the design spec's KV state reuses the `CONVERSATION_STATE` namespace Step 4 already provisioned with a real id), so there's nothing new for the project owner to fill in beyond running the two new commands (Task 22's migration apply, already-existing KV/D1 setup).
+
+**Type consistency:** `matchHouseFromReply({ text, houses }, env, deps) -> { houseId }` is called with the exact same shape by `handleAwaitingHouseReply` and `tryApplyCorrection` in Task 26, and its four-file provider-abstraction shape (`shared.js`/`openrouter.js`/`anthropic.js`/`index.js`) matches `parseExpense`'s established pattern from Step 2 exactly — same `{ apiKey, ..., fetchImpl }` adapter signature, same `env.AI_PROVIDER === 'anthropic'` dispatch rule. `awaiting_house` state (`{ pendingReviewId, attempt }`) and `correction` state (`{ expenseId, houseId, spreadsheetId, sheetRow }`) are written and read with identical shapes across `conversation-state.js` (Task 24), `fileExpense`/`handleAwaitingHouseReply`/`tryApplyCorrection` (Task 26). `insertExpense`'s and `insertPendingReview`'s new `id`-returning behavior (Task 22) is relied on consistently by `fileExpense` (`expenseId`) and the ambiguous-house branch (`pendingReviewId`) in Task 26 — no call site still expects the old raw `.run()` result. `extractAppendedRowNumber`/`deleteSheetRow` (Task 23) are called with the same parameter names in both `fileExpense` and `tryApplyCorrection`.
