@@ -8484,7 +8484,7 @@ git add expense-intake/src/index.js expense-intake/test/index.test.js expense-in
 - Modify: `expense-intake/src/google-auth.js`
 - Modify: `expense-intake/test/google-auth.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/google-auth.test.js`:
 
@@ -8508,12 +8508,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: google-a
   assert(scopeClaimSet.scope === 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file', 'a provided scope must override the default and support space-joined multiple scopes');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/google-auth.test.js`
 Expected: fails — `SHEETS_SCOPE`/`DRIVE_FILE_SCOPE` are not yet exported from `../src/google-auth.js`, and `getGoogleAccessToken` ignores any `scope` argument.
 
-- [ ] **Step 3: Add the parameter**
+- [x] **Step 3: Add the parameter**
 
 In `expense-intake/src/google-auth.js`, replace:
 
@@ -8548,17 +8548,17 @@ export async function getGoogleAccessToken({ serviceAccountJson, fetchImpl, now,
 
 (the rest of the function is unchanged)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/google-auth.test.js`
 Expected: `PASS: google-auth.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/google-auth.js expense-intake/test/google-auth.test.js
@@ -8572,7 +8572,7 @@ git add expense-intake/src/google-auth.js expense-intake/test/google-auth.test.j
 - Modify: `expense-intake/src/sheets.js`
 - Modify: `expense-intake/test/sheets.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/sheets.test.js`:
 
@@ -8636,12 +8636,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: sheets.t
   assert(threwShare, 'a non-2xx share response must throw');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/sheets.test.js`
 Expected: fails — `createSpreadsheet`/`writeHeaderRow`/`shareSpreadsheetWithEmail` are not yet exported from `../src/sheets.js`.
 
-- [ ] **Step 3: Add the functions**
+- [x] **Step 3: Add the functions**
 
 Add a new constant near the top of `expense-intake/src/sheets.js`, alongside `SHEETS_API_BASE`/`APPEND_RANGE`/`DEFAULT_SHEET_ID`:
 
@@ -8712,17 +8712,17 @@ export async function shareSpreadsheetWithEmail({ accessToken, spreadsheetId, em
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/sheets.test.js`
 Expected: `PASS: sheets.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/sheets.js expense-intake/test/sheets.test.js
@@ -8737,7 +8737,7 @@ git add expense-intake/src/sheets.js expense-intake/test/sheets.test.js
 - Create: `expense-intake/test/onboarding.test.js`
 - Modify: `expense-intake/test/run-all.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/onboarding.test.js
@@ -8856,12 +8856,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/onboarding.test.js`
 Expected: fails with a module-not-found error for `../src/onboarding.js` (it doesn't exist yet).
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 ```js
 // expense-intake/src/onboarding.js
@@ -8943,12 +8943,12 @@ export function buildOnboardingSql(config, housesWithSheets) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/onboarding.test.js`
 Expected: `PASS: onboarding.test.js`
 
-- [ ] **Step 5: Wire the new test into the runner**
+- [x] **Step 5: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -8976,12 +8976,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 6: Run the full suite to confirm no regressions**
+- [x] **Step 6: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 7: Stage the change**
+- [x] **Step 7: Stage the change**
 
 ```bash
 git add expense-intake/src/onboarding.js expense-intake/test/onboarding.test.js expense-intake/test/run-all.js
@@ -8995,7 +8995,7 @@ git add expense-intake/src/onboarding.js expense-intake/test/onboarding.test.js 
 - Modify: `expense-intake/src/onboarding.js`
 - Modify: `expense-intake/test/onboarding.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add `onboardClient` to the existing import from `'../src/onboarding.js'` in `expense-intake/test/onboarding.test.js`. Insert this block into `main()`, immediately before `console.log('PASS: onboarding.test.js');`:
 
@@ -9030,12 +9030,12 @@ Add `onboardClient` to the existing import from `'../src/onboarding.js'` in `exp
   }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/onboarding.test.js`
 Expected: fails — `onboardClient` is not yet exported from `../src/onboarding.js`.
 
-- [ ] **Step 3: Add the function**
+- [x] **Step 3: Add the function**
 
 Append to `expense-intake/src/onboarding.js`:
 
@@ -9049,17 +9049,17 @@ export async function onboardClient(config, deps = {}) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/onboarding.test.js`
 Expected: `PASS: onboarding.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/onboarding.js expense-intake/test/onboarding.test.js
@@ -9074,7 +9074,7 @@ git add expense-intake/src/onboarding.js expense-intake/test/onboarding.test.js
 
 This is the thin, side-effecting entrypoint — no dedicated automated test (it does real file I/O, a real subprocess call, and `process.exit`, none of which belong under the plain-Node `test/run-all.js` suite). Its only non-trivial logic, `validateConfig`, is already covered by Task 47's `onboarding.test.js`. Verification for this task is a manual dry run against `--local`.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 ```js
 #!/usr/bin/env node
@@ -9131,7 +9131,7 @@ main().catch((err) => {
 });
 ```
 
-- [ ] **Step 2: Manual dry run against `--local`**
+- [x] **Step 2: Manual dry run against `--local`**
 
 ```bash
 cd expense-intake
@@ -9151,7 +9151,7 @@ npx wrangler d1 execute expense-intake-db --local --command="SELECT * FROM clien
 
 Expected: the script prints the new house's Sheet URL (a real, newly created, shared spreadsheet — this dry run still makes real Google API calls, since there's no local emulation for Sheets/Drive, only for D1), and the `wrangler d1 execute --local` query shows the inserted client row. Clean up the test row afterward with `DELETE FROM clients WHERE twilio_number = '+15550001111'` (cascades are not enforced by SQLite by default, so also manually delete the corresponding `houses`/`authorized_senders` rows if this local D1 state will be reused).
 
-- [ ] **Step 3: Stage the change**
+- [x] **Step 3: Stage the change**
 
 ```bash
 git add expense-intake/scripts/onboard-client.js
@@ -9164,7 +9164,7 @@ git add expense-intake/scripts/onboard-client.js
 **Files:**
 - Modify: `expense-intake/README.md`
 
-- [ ] **Step 1: Add an "Onboarding a new client" section**
+- [x] **Step 1: Add an "Onboarding a new client" section**
 
 Insert this new section into `expense-intake/README.md`, immediately before `## Running the Worker's own tests`:
 
@@ -9215,7 +9215,7 @@ is still manual, since provisioning/configuring a phone number is a
 deliberate, billable action this script intentionally doesn't automate.
 ```
 
-- [ ] **Step 2: Update the `## Status` section**
+- [x] **Step 2: Update the `## Status` section**
 
 Replace `## Status` in `expense-intake/README.md` with:
 
@@ -9236,12 +9236,12 @@ See the specs under `docs/superpowers/specs/2026-08-18-*` and
 full history and design rationale of each step.
 ```
 
-- [ ] **Step 3: Run the full suite one more time**
+- [x] **Step 3: Run the full suite one more time**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 4: Stage the change**
+- [x] **Step 4: Stage the change**
 
 ```bash
 git add expense-intake/README.md

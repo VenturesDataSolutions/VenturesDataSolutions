@@ -51,18 +51,63 @@ implementation plan and Build Order.
 
 ## Status
 
-Build Order steps 1-8: repo scaffolding, D1 schema, the provider
-abstraction, the Twilio inbound webhook with R2 photo storage, the full
-happy-path pipeline (parse, categorize, file to Sheets/D1 or
+All 9 Build Order steps are complete: repo scaffolding, D1 schema, the
+provider abstraction, the Twilio inbound webhook with R2 photo storage,
+the full happy-path pipeline (parse, categorize, file to Sheets/D1 or
 `pending_review`), Twilio-retry dedup protection, the interactive
 house-selection reply flow, the 10-minute post-confirmation correction
 window, the client-initiated `"pending"` review queue, the daily purge /
-monthly nudge Cron Triggers, and save-contact onboarding (a one-time
-vCard MMS to each newly authorized sender). See the specs under
-`docs/superpowers/specs/2026-08-18-*` for those steps' designs. Not yet
-built: the onboarding CLI script (step 9) — houses/clients/authorized
-senders still need manual SQL to create, and `houses.google_sheet_id`
-must still be set by hand.
+monthly nudge Cron Triggers, save-contact onboarding (a one-time vCard
+MMS to each newly authorized sender), and the onboarding CLI script
+(auto-created/shared Google Sheets + D1 row creation for a new client).
+See the specs under `docs/superpowers/specs/2026-08-18-*` and
+`docs/superpowers/plans/2026-08-17-expense-intake-worker.md` for the
+full history and design rationale of each step.
+
+## Onboarding a new client
+
+Once a Twilio number has been purchased for the client (still a manual
+step — see "Twilio secrets" below), everything else is one command:
+
+```bash
+node scripts/onboard-client.js path/to/client-config.json path/to/service-account.json
+```
+
+The config file lists the client's business name, email (used only to
+share each house's Sheet as Viewer — never stored in D1), accounting
+software, Twilio number, and its houses/authorized senders:
+
+```json
+{
+  "businessName": "Acme Rentals",
+  "email": "owner@acme-rentals.com",
+  "accountingSoftware": "quickbooks_online",
+  "twilioNumber": "+15559876543",
+  "carePlanTier": "standard",
+  "houses": [
+    { "address": "123 Main St", "nickname": "Main St" }
+  ],
+  "authorizedSenders": [
+    { "phoneNumber": "+15551234567", "label": "Owner" }
+  ]
+}
+```
+
+`accountingSoftware` must be one of `quickbooks_online`,
+`quickbooks_desktop`, `wave`, `xero`, `csv`. The script creates each
+house's Google Sheet (with the correct header row) and shares it with
+`email` as a Viewer, then writes the `clients`/`houses`/
+`authorized_senders` rows to D1 via `wrangler d1 execute`. Pass
+`--local` to target the local D1 emulation for a dry run instead of the
+real remote database — there's no local emulation for Sheets/Drive, so
+even a `--local` dry run creates real Google Sheets. See
+`docs/superpowers/specs/2026-08-18-expense-intake-onboarding-cli-design.md`
+for the full design.
+
+After onboarding, point the client's Twilio number's messaging webhook
+at this Worker's `/sms` route (see "Twilio secrets" below) — that step
+is still manual, since provisioning/configuring a phone number is a
+deliberate, billable action this script intentionally doesn't automate.
 
 ## Running the Worker's own tests
 
