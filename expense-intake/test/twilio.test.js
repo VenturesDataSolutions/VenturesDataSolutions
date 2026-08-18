@@ -62,6 +62,16 @@ async function main() {
   const oversized = extractWebhookFields({ From: '+1', To: '+2', Body: '', NumMedia: '999999' });
   assert(oversized.media.length <= 10, 'an oversized NumMedia value must be capped rather than driving unbounded iteration over MediaUrlN fields');
 
+  // extractWebhookFields: messageSid is extracted for dedup purposes
+  const withSid = extractWebhookFields({
+    From: '+15551234567', To: '+15559876543', Body: 'hi', NumMedia: '0', MessageSid: 'SM1234567890abcdef',
+  });
+  assert(withSid.messageSid === 'SM1234567890abcdef', 'extractWebhookFields must expose MessageSid as messageSid');
+
+  // extractWebhookFields: missing MessageSid defaults to an empty string, not undefined
+  const noSid = extractWebhookFields({ From: '+1', To: '+2', Body: 'hi', NumMedia: '0' });
+  assert(noSid.messageSid === '', 'a missing MessageSid must default to an empty string');
+
   console.log('PASS: twilio.test.js');
 }
 

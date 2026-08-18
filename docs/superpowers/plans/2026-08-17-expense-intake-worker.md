@@ -1939,3 +1939,2045 @@ git add expense-intake/src/handlers.js expense-intake/test/handlers.test.js expe
 **Type consistency:** `handleSmsWebhook`'s return shape (`{status, contentType, body}`) is a new shape distinct from `worker/`'s `{status, body}` JSON-only convention — necessary because this route returns TwiML/XML and plain text, not JSON; `src/index.js`'s route handler consumes exactly this shape. `fields.media[]` entries (`{url, contentType}`) from Task 7's `extractWebhookFields` are consumed identically in Task 9's `handleSmsWebhook` (`fields.media[0].url`) and match what Task 8's `storeReceiptPhoto` expects as `mediaUrl`. The `imagesBinding`/`bucket` parameter names are identical across Task 8's `storeReceiptPhoto`, Task 9's `handleSmsWebhook`, and `src/index.js`'s `env.IMAGES`/`env.RECEIPTS_BUCKET` wiring — no renaming across the chain.
 
 **Known limitation flagged for the project owner, not silently glossed over:** because the Images binding has no local emulation, this step's automated tests (all of which run via plain `node`, zero dependencies) cannot verify that the *real* Cloudflare-side resize/recompress actually produces a correctly-sized, correctly-compressed JPEG — only that the Worker code calls the binding with the right parameters. Confirming the real behavior requires the project owner to run `wrangler dev --remote` (or deploy) with Images enabled and a Twilio number actually pointed at `/sms`, which is described in the README but can't be executed from an agent's local session.
+
+---
+
+## Step 4: Parse → categorize → Sheets write → confirmation SMS (happy path)
+
+**Interface (from spec, MESSAGE FLOW steps 3, 5-6; GOOGLE SHEETS FORMAT; SMS COPY):** after a photo is stored (or for a text-only message), call `parseExpense()`, determine the house, and either write a row to that house's Google Sheet + `expenses` table and reply with confirmation copy (high confidence, exactly one house), or write to `pending_review` and reply with the appropriate copy (low confidence, or house ambiguous). House-selection's actual KV-backed interactive prompt-and-wait and the 10-minute correction window are Build Order step 5 — out of scope here.
+
+**Design decisions locked in for this step (researched against current Google/Twilio docs, plus two decisions confirmed with the project owner):**
+
+- **Photo access for the Sheet's "Photo" column** (confirmed with project owner): a new public, unauthenticated `GET /receipts/:key` route streams the object straight from R2. Security relies on the R2 key being effectively unguessable (it already embeds a random UUID, from Step 3) — the same trust model as "anyone with this link" sharing. No signed/expiring URLs in this step.
+- **Google Sheets auth** uses the service-account JWT-bearer OAuth flow (researched against Google's own docs, not guessed): build a JWT (header `{alg: "RS256", typ: "JWT"}`, claim set `{iss: <service account email>, scope: "https://www.googleapis.com/auth/spreadsheets", aud: "https://oauth2.googleapis.com/token", iat, exp: iat+3600}`), sign it with the service account's PKCS8 private key via `crypto.subtle.sign('RSASSA-PKCS1-v1_5', ...)`, POST it to `https://oauth2.googleapis.com/token` as a `urn:ietf:params:oauth:grant-type:jwt-bearer` assertion, and use the returned `access_token` as a Bearer token against the Sheets API. This is the same "sign something, POST it, use Web Crypto" shape as Twilio's HMAC verification and OpenRouter/Anthropic's Bearer auth, just with RS256 instead of HMAC. `GOOGLE_SERVICE_ACCOUNT_JSON` (already in the spec's SECRETS list, unused until now) holds the full service-account JSON key file as a single secret value.
+- **Sheets write** uses `POST https://sheets.googleapis.com/v4/spreadsheets/{id}/values/Sheet1!A:I:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`. `USER_ENTERED` (not `RAW`) is required, not a style choice — the spec's "Tax Rollup" tab auto-sums `Amount` by `Category`, which only works if Sheets recognizes the Amount cell as a real number, not literal text.
+- **Confirmation SMS is a synchronous TwiML `<Message>` in the webhook response**, not a separate outbound REST call — Twilio natively supports replying to an inbound message this way, and it's simpler and faster than a second authenticated round-trip. This means **no outbound-send module is needed in this step at all** — that only becomes necessary for the monthly nudge (Build Order step 7, a cron job with no inbound webhook to piggyback a TwiML reply on), so building it now would be speculative. `src/twilio.js` gets no outbound-send function in this step.
+- **Confidence threshold** is a named constant, `CONFIDENCE_THRESHOLD = 0.7`, in `src/expense-flow.js`. The spec doesn't pin an exact number ("Low confidence → write to pending_review only" without a threshold) — this is a tunable engineering parameter, not a business decision with infra/security stakes, so a sensible default is used and called out clearly as adjustable once the project owner sees real-world parse results.
+- **House ambiguity, before Build Order step 5's interactive flow exists:** a client with zero or more than one house is treated like a low-confidence case for *this* step only — the expense is written to `pending_review` with `house_id = NULL` (the schema already supports this, from Step 1), and the reply uses the spec's `house_selection` SMS copy (already defined in `src/providers/shared.js` from Step 2). If the client replies with a house name before step 5 ships the actual KV-backed matching logic, that reply is just processed as a new, independent inbound message — not lost, just not yet intelligently matched to the pending item. This is a temporary, self-correcting gap step 5 closes, not data loss.
+- **A resolved house with no `google_sheet_id` set** (a client/house onboarded via manual SQL — the "v1 manual" onboarding process, since Build Order step 9's CLI script doesn't exist yet — before its Sheet was created) throws an explicit error rather than silently falling back to `pending_review`. A missing Sheet is an onboarding/configuration gap, not a parsing-confidence issue, and silently swallowing it would make manual testing confusing (never knowing if the code or the setup is broken). The error is loud (visible in `wrangler tail`) and the webhook returns 500, matching the existing "let Twilio retry, don't return a false 200" pattern from Step 3.
+- **Unknown Twilio "To" number or unauthorized sender phone number** both produce a silent, empty TwiML acknowledgment (200, no `<Message>`) — there's no client record to pull tone/copy from for an unrecognized number, and replying to a number that isn't on `authorized_senders` would leak whether that's a valid client number to a stranger.
+- **A genuinely empty inbound message** (no body text, no photo) short-circuits before any D1 lookups — there's nothing to process.
+- Follows the established architecture: small pure modules taking explicit dependencies, `fetchImpl` injection throughout, a new `test/fake-d1.js` test double (mirroring `test/fake-kv.js`/`test/fake-r2.js`) for the D1 binding.
+- **A `null` amount always routes to `pending_review`, regardless of confidence** (added during Task 15's code review): `normalizeParseExpenseResult` allows `amount: null` independently of `confidence` — a model can be fully confident about vendor/category while the total is illegible. Auto-filing that as `$0.00` would be indistinguishable from a genuine zero-dollar expense and give the client no signal to use the correction window. The high-confidence auto-file condition is `parsed.confidence >= CONFIDENCE_THRESHOLD && parsed.amount != null`.
+- **Idempotency guard against Twilio webhook retries (Task 16), confirmed with the project owner rather than deferred.** If `appendExpenseRow`/`insertExpense`/`insertPendingReview` succeed but the response never makes it back to Twilio in time (slow reply, transient network issue), Twilio retries the whole POST, and without a guard `processExpenseMessage` would run again from scratch — writing a second Sheet row and a second `expenses`/`pending_review` row for one physical receipt. Fixing this needed a dedupe key (Twilio's `MessageSid`, added to `extractWebhookFields` in Task 16 — extending Step 3's already-committed `src/twilio.js`) and somewhere to record "already processed": a new `CONVERSATION_STATE` KV namespace, introduced now rather than waiting for Build Order step 5 (which will reuse the same namespace for house-selection/correction-window state, not add a second one). This is a best-effort, mark-after-success guard, not an airtight distributed lock — genuine concurrent double-delivery (two invocations processing the same still-in-flight message at once) remains a real, accepted residual gap that would need atomic compare-and-swap (Durable Objects, not proportionate here yet) to close fully.
+- **`safeGenerateSmsCopy` fallback (Task 15, added during Step 4's whole-step review — this was a Critical finding, not a nice-to-have).** The mark-after-success design above only protects against retries IF `processExpenseMessage` actually reaches success. Without this fix, an ordinary `generateSmsCopy` failure (rate limit, timeout — routine for an external API call) occurring *after* `appendExpenseRow`/`insertExpense` had already committed would propagate uncaught, turn the response into a 500, and — since nothing gets cached on a 500 — deterministically cause Twilio's retry to reprocess and duplicate the write. This wasn't a rare concurrency edge case; it was a guaranteed duplication on any sequential copy-generation failure after a successful write, which defeated much of the point of Task 16. `safeGenerateSmsCopy` wraps all three `generateSmsCopy` call sites in `expense-flow.js`, falling back to static (non-AI-generated) copy — with the real values substituted, not the raw `SMS_COPY_ANCHORS` template strings — so the pipeline always reaches a cacheable success once the underlying write has committed, regardless of whether the "nice" AI-generated wording succeeds.
+
+### Task 10: D1 query helpers
+
+**Files:**
+- Create: `expense-intake/src/db.js`
+- Create: `expense-intake/test/fake-d1.js`
+- Create: `expense-intake/test/db.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [x] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/fake-d1.js
+// Mimics the shape of the real D1 binding (env.DB) closely enough to test query-layer
+// wiring: prepare(sql).bind(...params).first()/.all()/.run(). Keyed by exact SQL string,
+// since src/db.js's queries are fixed, known strings — same call-recording spirit as
+// fakeFetch elsewhere in this codebase.
+export function createFakeD1(responses = {}) {
+  const calls = [];
+
+  function makeStatement(sql) {
+    let boundParams = [];
+    const statement = {
+      bind(...params) {
+        boundParams = params;
+        return statement;
+      },
+      async first() {
+        calls.push({ sql, params: boundParams, method: 'first' });
+        const handler = responses[sql];
+        const value = typeof handler === 'function' ? handler(boundParams) : handler;
+        return value === undefined ? null : value;
+      },
+      async all() {
+        calls.push({ sql, params: boundParams, method: 'all' });
+        const handler = responses[sql];
+        const value = typeof handler === 'function' ? handler(boundParams) : handler;
+        return { results: value || [] };
+      },
+      async run() {
+        calls.push({ sql, params: boundParams, method: 'run' });
+        const handler = responses[sql];
+        const value = typeof handler === 'function' ? handler(boundParams) : handler;
+        return value || { success: true, meta: { last_row_id: 1, changes: 1 } };
+      },
+    };
+    return statement;
+  }
+
+  return {
+    prepare(sql) {
+      return makeStatement(sql);
+    },
+    calls,
+  };
+}
+```
+
+```js
+// expense-intake/test/db.test.js
+import {
+  findClientByTwilioNumber,
+  findAuthorizedSender,
+  findHousesForClient,
+  insertExpense,
+  insertPendingReview,
+} from '../src/db.js';
+import { createFakeD1 } from './fake-d1.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+async function main() {
+  // findClientByTwilioNumber
+  const clientRow = { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' };
+  const db1 = createFakeD1({
+    'SELECT * FROM clients WHERE twilio_number = ?': clientRow,
+  });
+  const client = await findClientByTwilioNumber(db1, '+15559876543');
+  assert(client === clientRow, 'findClientByTwilioNumber must return the row from the fake DB');
+  assert(db1.calls[0].params[0] === '+15559876543', 'must bind the Twilio number as the query parameter');
+
+  // findClientByTwilioNumber: not found
+  const db2 = createFakeD1({ 'SELECT * FROM clients WHERE twilio_number = ?': null });
+  const missingClient = await findClientByTwilioNumber(db2, '+10000000000');
+  assert(missingClient === null, 'findClientByTwilioNumber must return null when no client matches');
+
+  // findAuthorizedSender
+  const senderRow = { id: 5, client_id: 1, phone_number: '+15551234567' };
+  const db3 = createFakeD1({
+    'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': senderRow,
+  });
+  const sender = await findAuthorizedSender(db3, 1, '+15551234567');
+  assert(sender === senderRow, 'findAuthorizedSender must return the row from the fake DB');
+  assert(db3.calls[0].params[0] === 1 && db3.calls[0].params[1] === '+15551234567', 'must bind clientId then phoneNumber, in that order');
+
+  // findHousesForClient
+  const houseRows = [{ id: 10, client_id: 1, address: '123 Main St' }, { id: 11, client_id: 1, address: '456 Oak Ave' }];
+  const db4 = createFakeD1({
+    'SELECT * FROM houses WHERE client_id = ?': houseRows,
+  });
+  const houses = await findHousesForClient(db4, 1);
+  assert(houses === houseRows, 'findHousesForClient must return the results array from the fake DB');
+  assert(db4.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
+
+  // findHousesForClient: none found
+  const db5 = createFakeD1({ 'SELECT * FROM houses WHERE client_id = ?': [] });
+  const noHouses = await findHousesForClient(db5, 999);
+  assert(Array.isArray(noHouses) && noHouses.length === 0, 'findHousesForClient must return an empty array when the client has no houses');
+
+  // insertExpense
+  const db6 = createFakeD1();
+  await insertExpense(db6, {
+    houseId: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials',
+    confidence: 0.9, photoR2Key: 'receipts/x/1.jpg', rawText: 'HD $42.50', loggedByPhone: '+15551234567', notes: '',
+  });
+  const insertCall = db6.calls[0];
+  assert(insertCall.sql.includes('INSERT INTO expenses'), 'insertExpense must INSERT into the expenses table');
+  assert(insertCall.params[0] === 10 && insertCall.params[1] === '2026-08-17' && insertCall.params[4] === 'Materials', 'must bind house_id, date, and category in the expected column order');
+
+  // insertExpense: notes defaults to empty string when omitted
+  const db7 = createFakeD1();
+  await insertExpense(db7, {
+    houseId: 10, date: '2026-08-17', vendor: null, amount: null, category: 'Other',
+    confidence: 0.2, photoR2Key: null, rawText: '', loggedByPhone: '+15551234567',
+  });
+  assert(db7.calls[0].params[9] === '', 'insertExpense must default a missing notes value to an empty string, not undefined');
+
+  // insertPendingReview
+  const db8 = createFakeD1();
+  await insertPendingReview(db8, {
+    clientId: 1, houseId: null, amountGuess: null, categoryGuess: null,
+    photoR2Key: 'receipts/x/2.jpg', rawText: 'unclear', confidence: 0, expiresAt: '2026-10-16T00:00:00.000Z',
+  });
+  const pendingCall = db8.calls[0];
+  assert(pendingCall.sql.includes('INSERT INTO pending_review'), 'insertPendingReview must INSERT into the pending_review table');
+  assert(pendingCall.params[0] === 1 && pendingCall.params[1] === null, 'must bind client_id and a null house_id when the house is ambiguous');
+
+  console.log('PASS: db.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/db.test.js`
+Expected: fails with a module-not-found error for `../src/db.js`.
+
+- [x] **Step 3: Write the module**
+
+```js
+// expense-intake/src/db.js
+
+export async function findClientByTwilioNumber(db, twilioNumber) {
+  return db.prepare('SELECT * FROM clients WHERE twilio_number = ?').bind(twilioNumber).first();
+}
+
+export async function findAuthorizedSender(db, clientId, phoneNumber) {
+  return db.prepare('SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?').bind(clientId, phoneNumber).first();
+}
+
+export async function findHousesForClient(db, clientId) {
+  const result = await db.prepare('SELECT * FROM houses WHERE client_id = ?').bind(clientId).all();
+  return result.results;
+}
+
+export async function insertExpense(db, { houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone, notes }) {
+  return db
+    .prepare('INSERT INTO expenses (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone, notes || '')
+    .run();
+}
+
+export async function insertPendingReview(db, { clientId, houseId, amountGuess, categoryGuess, photoR2Key, rawText, confidence, expiresAt }) {
+  return db
+    .prepare('INSERT INTO pending_review (client_id, house_id, amount_guess, category_guess, photo_r2_key, raw_text, confidence, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(clientId, houseId, amountGuess, categoryGuess, photoR2Key, rawText, confidence, expiresAt)
+    .run();
+}
+```
+
+- [x] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 5: Run test to verify it passes**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all ten test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/db.js expense-intake/test/fake-d1.js expense-intake/test/db.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 11: Google service-account authentication
+
+**Files:**
+- Create: `expense-intake/src/google-auth.js`
+- Create: `expense-intake/test/google-auth.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+The test generates a real RSA keypair with Node's `crypto.generateKeyPairSync` and verifies the module's JWT signature against the real public key — this catches a broken signing implementation (wrong algorithm, wrong encoding, wrong signing input) in a way a hand-typed fake signature never could.
+
+- [x] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/google-auth.test.js
+import crypto from 'node:crypto';
+import { getGoogleAccessToken } from '../src/google-auth.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function generateTestServiceAccount() {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  return {
+    serviceAccount: { client_email: 'test-sa@test-project.iam.gserviceaccount.com', private_key: privateKey },
+    publicKey,
+  };
+}
+
+function base64UrlDecode(str) {
+  const padded = str.replace(/-/g, '+').replace(/_/g, '/').padEnd(str.length + ((4 - (str.length % 4)) % 4), '=');
+  return Buffer.from(padded, 'base64');
+}
+
+function fakeFetch(ok, status, body) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    return { ok, status, json: async () => body };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+async function main() {
+  const { serviceAccount, publicKey } = generateTestServiceAccount();
+
+  // happy path: builds and signs a real JWT, exchanges it, returns the access token
+  const fetchImpl = fakeFetch(true, 200, { access_token: 'ya29.fake_token', token_type: 'Bearer', expires_in: 3600 });
+  const token = await getGoogleAccessToken({ serviceAccountJson: serviceAccount, fetchImpl, now: () => 1735689600000 });
+  assert(token === 'ya29.fake_token', 'getGoogleAccessToken must return the access_token from the response');
+
+  const call = fetchImpl.calls[0];
+  assert(call.url === 'https://oauth2.googleapis.com/token', 'must POST to the Google token endpoint');
+  const bodyParams = new URLSearchParams(call.init.body);
+  assert(bodyParams.get('grant_type') === 'urn:ietf:params:oauth:grant-type:jwt-bearer', 'must use the JWT bearer grant type');
+  const jwt = bodyParams.get('assertion');
+  assert(jwt, 'must send a signed JWT as the assertion parameter');
+
+  // the JWT must actually verify against the service account's real public key —
+  // this is the thing that would catch a broken signing implementation
+  const [encodedHeader, encodedClaimSet, encodedSignature] = jwt.split('.');
+  const header = JSON.parse(base64UrlDecode(encodedHeader).toString('utf8'));
+  const claimSet = JSON.parse(base64UrlDecode(encodedClaimSet).toString('utf8'));
+  assert(header.alg === 'RS256', 'JWT header must specify RS256');
+  assert(claimSet.iss === 'test-sa@test-project.iam.gserviceaccount.com', 'JWT claim set must carry the service account email as iss');
+  assert(claimSet.scope === 'https://www.googleapis.com/auth/spreadsheets', 'JWT claim set must request the Sheets scope');
+  assert(claimSet.aud === 'https://oauth2.googleapis.com/token', 'JWT claim set aud must be the token endpoint');
+  assert(claimSet.exp === claimSet.iat + 3600, 'JWT must expire exactly 1 hour after issuance');
+
+  const signingInput = `${encodedHeader}.${encodedClaimSet}`;
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(signingInput);
+  const signatureValid = verifier.verify(publicKey, base64UrlDecode(encodedSignature));
+  assert(signatureValid, "the JWT signature must verify against the service account's real public key");
+
+  // error path: Google rejects the token request
+  const failFetch = fakeFetch(false, 400, { error: 'invalid_grant', error_description: 'Invalid JWT signature' });
+  let threw = false;
+  try {
+    await getGoogleAccessToken({ serviceAccountJson: serviceAccount, fetchImpl: failFetch });
+  } catch (err) {
+    threw = true;
+    assert(err.message === 'Invalid JWT signature', "must surface Google's error_description");
+  }
+  assert(threw, 'a non-2xx token response must throw');
+
+  // accepts a JSON string for serviceAccountJson too (as it would come from an env secret)
+  const stringFetch = fakeFetch(true, 200, { access_token: 'ya29.from_string', token_type: 'Bearer', expires_in: 3600 });
+  const tokenFromString = await getGoogleAccessToken({ serviceAccountJson: JSON.stringify(serviceAccount), fetchImpl: stringFetch });
+  assert(tokenFromString === 'ya29.from_string', 'must accept serviceAccountJson as a raw JSON string (as stored in a Worker secret)');
+
+  console.log('PASS: google-auth.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/google-auth.test.js`
+Expected: fails with a module-not-found error for `../src/google-auth.js`.
+
+- [x] **Step 3: Write the module**
+
+```js
+// expense-intake/src/google-auth.js
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+
+function base64UrlEncode(bytes) {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = '';
+  for (const byte of arr) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlEncodeString(str) {
+  return base64UrlEncode(new TextEncoder().encode(str));
+}
+
+function pemToArrayBuffer(pem) {
+  const base64 = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s+/g, '');
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function signJwt(claimSet, privateKeyPem) {
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const encodedHeader = base64UrlEncodeString(JSON.stringify(header));
+  const encodedClaimSet = base64UrlEncodeString(JSON.stringify(claimSet));
+  const signingInput = `${encodedHeader}.${encodedClaimSet}`;
+
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    pemToArrayBuffer(privateKeyPem),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(signingInput));
+  const encodedSignature = base64UrlEncode(signature);
+
+  return `${signingInput}.${encodedSignature}`;
+}
+
+export async function getGoogleAccessToken({ serviceAccountJson, fetchImpl, now }) {
+  const account = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson;
+  const getNow = now || Date.now;
+  const nowSeconds = Math.floor(getNow() / 1000);
+  const claimSet = {
+    iss: account.client_email,
+    scope: SHEETS_SCOPE,
+    aud: TOKEN_URL,
+    iat: nowSeconds,
+    exp: nowSeconds + 3600,
+  };
+  const jwt = await signJwt(claimSet, account.private_key);
+
+  const doFetch = fetchImpl || fetch;
+  const response = await doFetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${encodeURIComponent(jwt)}`,
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.error_description) || (data && data.error) || `Google token request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  if (typeof data.access_token !== 'string') {
+    throw new Error('Google token response missing access_token');
+  }
+  return data.access_token;
+}
+```
+
+- [x] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 5: Run test to verify it passes**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all eleven test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/google-auth.js expense-intake/test/google-auth.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 12: Google Sheets row append
+
+**Files:**
+- Create: `expense-intake/src/sheets.js`
+- Create: `expense-intake/test/sheets.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [x] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/sheets.test.js
+import { appendExpenseRow } from '../src/sheets.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function fakeFetch(ok, status, body) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    return { ok, status, json: async () => body };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+async function main() {
+  const okBody = { spreadsheetId: 'sheet123', updates: { updatedRows: 1 } };
+  const fetchImpl = fakeFetch(true, 200, okBody);
+  const row = ['2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, 'https://x/receipts/key.jpg', 'HD $42.50', '+15551234567', ''];
+
+  const result = await appendExpenseRow({ accessToken: 'ya29.token', spreadsheetId: 'sheet123', row, fetchImpl });
+  assert(result === okBody, 'appendExpenseRow must return the parsed response body');
+
+  const call = fetchImpl.calls[0];
+  assert(call.url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/sheet123/values/'), 'must hit the values:append endpoint for the given spreadsheetId');
+  assert(call.url.includes(':append'), 'must use the :append action');
+  assert(call.url.includes('valueInputOption=USER_ENTERED'), "must use USER_ENTERED so numbers/dates are interpreted, not stored as literal text (required for the Tax Rollup tab's SUM to work)");
+  assert(call.url.includes('insertDataOption=INSERT_ROWS'), 'must use INSERT_ROWS so appending never overwrites existing data');
+  assert(call.init.headers.Authorization === 'Bearer ya29.token', 'must send the access token as a Bearer token');
+  const body = JSON.parse(call.init.body);
+  assert(Array.isArray(body.values) && body.values.length === 1 && JSON.stringify(body.values[0]) === JSON.stringify(row), 'must wrap the row in a single-row values array');
+
+  // error path
+  const failFetch = fakeFetch(false, 403, { error: { message: 'The caller does not have permission' } });
+  let threw = false;
+  try {
+    await appendExpenseRow({ accessToken: 'bad', spreadsheetId: 'sheet123', row, fetchImpl: failFetch });
+  } catch (err) {
+    threw = true;
+    assert(err.message === 'The caller does not have permission', 'must surface the Sheets API error message');
+  }
+  assert(threw, 'a non-2xx Sheets API response must throw');
+
+  console.log('PASS: sheets.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/sheets.test.js`
+Expected: fails with a module-not-found error for `../src/sheets.js`.
+
+- [x] **Step 3: Write the module**
+
+```js
+// expense-intake/src/sheets.js
+const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
+
+export async function appendExpenseRow({ accessToken, spreadsheetId, row, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const range = encodeURIComponent('Sheet1!A:I');
+  const url = `${SHEETS_API_BASE}/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const response = await doFetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.error && data.error.message) || `Sheets API request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+```
+
+- [x] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 5: Run test to verify it passes**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all twelve test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/sheets.js expense-intake/test/sheets.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 13: TwiML response builder
+
+**Files:**
+- Create: `expense-intake/src/twiml.js`
+- Create: `expense-intake/test/twiml.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [x] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/twiml.test.js
+import { buildTwiml } from '../src/twiml.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+async function main() {
+  assert(buildTwiml('') === '<Response></Response>', 'an empty message body must produce a bare empty Response');
+  assert(buildTwiml(null) === '<Response></Response>', 'a null message body must produce a bare empty Response');
+  assert(buildTwiml('Logged: $42.50, Materials, Main St.') === '<Response><Message>Logged: $42.50, Materials, Main St.</Message></Response>', 'a message body must be wrapped in a <Message> tag');
+  assert(buildTwiml('Tom & Jerry <3') === '<Response><Message>Tom &amp; Jerry &lt;3</Message></Response>', 'special XML characters must be escaped so the TwiML stays well-formed');
+
+  console.log('PASS: twiml.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/twiml.test.js`
+Expected: fails with a module-not-found error for `../src/twiml.js`.
+
+- [x] **Step 3: Write the module**
+
+```js
+// expense-intake/src/twiml.js
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+export function buildTwiml(messageBody) {
+  if (!messageBody) {
+    return '<Response></Response>';
+  }
+  return `<Response><Message>${escapeXml(messageBody)}</Message></Response>`;
+}
+```
+
+- [x] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 5: Run test to verify it passes**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all thirteen test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/twiml.js expense-intake/test/twiml.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 14: Public photo-serving route
+
+**Files:**
+- Create: `expense-intake/test/handlers.test.js` additions (this file doesn't exist as a Step 4 artifact yet in isolation — see Note below)
+- Modify: `expense-intake/src/handlers.js` (add `handleGetReceipt`, additive only — does not touch `handleSmsWebhook`)
+- Modify: `expense-intake/src/index.js` (add `GET /receipts/:key`)
+- Modify: `expense-intake/test/handlers.test.js`
+- Modify: `expense-intake/test/index.test.js`
+
+**Note:** `handlers.js`/`handlers.test.js`/`index.js`/`index.test.js` already exist from Step 3 (Task 9) and get a much larger rewrite in Task 17 later (when `handleSmsWebhook`'s signature changes to wire in the new parsing pipeline). This task deliberately only *adds* `handleGetReceipt` and its route — it does not touch `handleSmsWebhook` at all, so it can be built, tested, and staged independently before that larger rewrite.
+
+- [x] **Step 1: Write the failing test**
+
+Add this to the end of `expense-intake/test/handlers.test.js`'s `main()` function, before the `console.log('PASS: handlers.test.js');` line, and add the import:
+
+```js
+// expense-intake/test/handlers.test.js — add this import at the top, alongside the existing ones
+import { handleSmsWebhook, handleGetReceipt } from '../src/handlers.js';
+```
+
+```js
+// expense-intake/test/handlers.test.js — add before the final console.log in main()
+
+  // handleGetReceipt: found
+  {
+    const bucket = createFakeR2Bucket();
+    await bucket.put('receipts/x/1.jpg', new ArrayBuffer(4), { httpMetadata: { contentType: 'image/jpeg' } });
+    const found = await handleGetReceipt({ key: 'receipts/x/1.jpg', bucket });
+    assert(found.status === 200 && found.contentType === 'image/jpeg', 'a stored photo must be served with its stored content type');
+  }
+
+  // handleGetReceipt: not found
+  {
+    const bucket = createFakeR2Bucket();
+    const missing = await handleGetReceipt({ key: 'receipts/nope.jpg', bucket });
+    assert(missing.status === 404, 'a missing key must 404');
+  }
+```
+
+Also add this to `expense-intake/test/index.test.js`, before its final `console.log('PASS: index.test.js');`:
+
+```js
+// expense-intake/test/index.test.js — add before the final console.log in main()
+
+  // GET /receipts/:key through the real routing layer
+  const receiptBucket = createFakeR2Bucket();
+  await receiptBucket.put('receipts/x/1.jpg', new ArrayBuffer(4), { httpMetadata: { contentType: 'image/jpeg' } });
+  request = new Request('https://expense-intake.example.com/receipts/' + encodeURIComponent('receipts/x/1.jpg'), { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv(createFakeImagesBinding(new ArrayBuffer(0)), receiptBucket));
+  assert(response.status === 200 && response.headers.get('Content-Type') === 'image/jpeg', 'a stored receipt photo must be served through the real GET /receipts/:key route');
+
+  // GET /receipts/:key for a missing key -> 404
+  request = new Request('https://expense-intake.example.com/receipts/' + encodeURIComponent('receipts/nope.jpg'), { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv(createFakeImagesBinding(new ArrayBuffer(0)), createFakeR2Bucket()));
+  assert(response.status === 404, 'a missing receipt key must 404 through the real route');
+```
+
+- [x] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/handlers.test.js` and `node expense-intake/test/index.test.js`
+Expected: both fail — `handleGetReceipt` doesn't exist yet, and `GET /receipts/:key` isn't routed yet (falls through to 404, but the "found" case's assertion on `Content-Type: image/jpeg` fails since the 404 fallback returns `application/json`).
+
+- [x] **Step 3: Add `handleGetReceipt` to `src/handlers.js`**
+
+Add this export to the end of `expense-intake/src/handlers.js` (keep everything already there from Step 3 unchanged):
+
+```js
+// expense-intake/src/handlers.js — add this export, keep everything else in the file as-is
+
+export async function handleGetReceipt({ key, bucket }) {
+  const object = await bucket.get(key);
+  if (!object) {
+    return { status: 404, contentType: 'text/plain', body: 'Not found' };
+  }
+  const bytes = await object.arrayBuffer();
+  const contentType = (object.httpMetadata && object.httpMetadata.contentType) || 'image/jpeg';
+  return { status: 200, contentType, body: bytes };
+}
+```
+
+- [x] **Step 4: Wire the route into `src/index.js`**
+
+Add this route block to `expense-intake/src/index.js`, right after the existing `POST /sms` block (keep everything else in the file — the `/sms` route, the import line, the 404 fallback — unchanged):
+
+```js
+// expense-intake/src/index.js — add this block after the POST /sms route, and add
+// handleGetReceipt to the existing import from './handlers.js'
+
+    if (request.method === 'GET' && url.pathname.startsWith('/receipts/')) {
+      const key = decodeURIComponent(url.pathname.slice('/receipts/'.length));
+      const result = await handleGetReceipt({ key, bucket: env.RECEIPTS_BUCKET });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+```
+
+- [x] **Step 5: Run tests to verify they pass**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all thirteen test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/handlers.js expense-intake/src/index.js expense-intake/test/handlers.test.js expense-intake/test/index.test.js
+```
+
+---
+
+### Task 15: Expense-flow orchestration (parse → categorize → file)
+
+**Files:**
+- Create: `expense-intake/src/expense-flow.js`
+- Create: `expense-intake/test/expense-flow.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+This is the module that implements all the branching logic from this step's Design decisions note: house resolution, confidence branching, `expenses`/`pending_review` writes, and the Sheets write. It does not build TwiML or touch the HTTP layer — Task 17 wires this into `handleSmsWebhook`.
+
+- [x] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/expense-flow.test.js
+import crypto from 'node:crypto';
+import { processExpenseMessage } from '../src/expense-flow.js';
+import { createFakeD1 } from './fake-d1.js';
+import { createFakeR2Bucket } from './fake-r2.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function generateTestServiceAccount() {
+  const { privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  return { client_email: 'test-sa@test.iam.gserviceaccount.com', private_key: privateKey };
+}
+
+function chatResponse(content) {
+  return { choices: [{ message: { content } }] };
+}
+
+function dispatchFetch(handlers) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    for (const [match, respond] of handlers) {
+      if (url.includes(match)) return respond(url, init);
+    }
+    throw new Error(`Unhandled fetch in test: ${url}`);
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+function jsonOk(body) {
+  return async () => ({ ok: true, status: 200, json: async () => body });
+}
+
+async function withStoredPhoto(bucket, key) {
+  await bucket.put(key, new ArrayBuffer(4), { httpMetadata: { contentType: 'image/jpeg' } });
+}
+
+function baseEnv(db, bucket, overrides = {}) {
+  return {
+    DB: db,
+    RECEIPTS_BUCKET: bucket,
+    AI_PROVIDER: 'openrouter',
+    OPENROUTER_API_KEY: 'or_key',
+    GOOGLE_SERVICE_ACCOUNT_JSON: generateTestServiceAccount(),
+    WORKER_BASE_URL: 'https://expense-intake.example.workers.dev',
+    ...overrides,
+  };
+}
+
+function openRouterHandler(parseContent, copyContent) {
+  return async (url, init) => {
+    const body = JSON.parse(init.body);
+    const isParse = body.messages.some((m) => Array.isArray(m.content));
+    const content = isParse ? parseContent : copyContent;
+    return { ok: true, status: 200, json: async () => chatResponse(content) };
+  };
+}
+
+async function main() {
+  const client = { id: 1, twilio_number: '+15559876543' };
+  const sender = { id: 5, client_id: 1, phone_number: '+15551234567' };
+  const singleHouse = [{ id: 10, client_id: 1, address: '123 Main St', nickname: 'Main St', google_sheet_id: 'sheet_abc' }];
+
+  // 1. Happy path: single house, high confidence, photo message
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    await withStoredPhoto(bucket, 'receipts/x/1.jpg');
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc' })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '', media: [] },
+      photoR2Key: 'receipts/x/1.jpg',
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a high-confidence happy path must produce a confirmation SMS body');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'a high-confidence match must insert an expenses row');
+    assert(expenseInsert.params[4] === 'Materials', 'the inserted expense must carry the parsed category');
+    const sheetsCall = fetchImpl.calls.find((c) => c.url.includes('sheets.googleapis.com'));
+    assert(sheetsCall, 'a high-confidence match must append a row to the house Sheet');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(!pendingInsert, 'a high-confidence match must not also write to pending_review');
+  }
+
+  // 2. Low confidence: single house, low-confidence parse -> pending_review, not expenses
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: null, amount: null, category: 'Other', confidence: 0.2, raw_text: 'blurry' }),
+        'Saved under Other — flagged for review.'
+      )],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'some note', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a low-confidence match must still produce an SMS body');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'a low-confidence match must write to pending_review');
+    assert(pendingInsert.params[1] === 10, 'a low-confidence match with a known house must still record that house_id in pending_review');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(!expenseInsert, 'a low-confidence match must not write to expenses');
+    const sheetsCall = fetchImpl.calls.find((c) => c.url.includes('sheets.googleapis.com'));
+    assert(!sheetsCall, 'a low-confidence match must not touch the Sheet');
+  }
+
+  // 3. Ambiguous house (two houses): pending_review with house_id null, house_selection copy
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Lowes', amount: 10, category: 'Materials', confidence: 0.95, raw_text: 'Lowes $10' }),
+        'Which house is this for?'
+      )],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $10', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'an ambiguous house must still produce a prompt SMS body');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'an ambiguous house must write to pending_review even with high confidence');
+    assert(pendingInsert.params[1] === null, "an ambiguous house must record a null house_id, since we don't know which one");
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(!expenseInsert, 'an ambiguous house must never write directly to expenses, regardless of confidence');
+  }
+
+  // 4. Unknown client: silent ack, no writes
+  {
+    const db = createFakeD1({ 'SELECT * FROM clients WHERE twilio_number = ?': null });
+    const bucket = createFakeR2Bucket();
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+10000000000', body: 'hi', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: {},
+    });
+    assert(result.smsBody === '', 'an unrecognized Twilio "To" number must produce a silent (empty) acknowledgment');
+    assert(db.calls.length === 1, 'an unknown client must not proceed past the initial client lookup');
+  }
+
+  // 5. Unauthorized sender: silent ack
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': null,
+    });
+    const bucket = createFakeR2Bucket();
+    const result = await processExpenseMessage({
+      fields: { from: '+19998887777', to: '+15559876543', body: 'hi', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: {},
+    });
+    assert(result.smsBody === '', 'an unauthorized sender must produce a silent (empty) acknowledgment');
+  }
+
+  // 6. Empty message (no body, no photo): silent ack, no D1 lookups at all
+  {
+    const db = createFakeD1();
+    const bucket = createFakeR2Bucket();
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: '', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: {},
+    });
+    assert(result.smsBody === '', 'a genuinely empty message must produce a silent acknowledgment');
+    assert(db.calls.length === 0, 'a genuinely empty message must short-circuit before any D1 lookups');
+  }
+
+  // 7. Parse failure: treated as confidence 0, routed to pending_review
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+        }
+        // Only the parse call should fail in this scenario — the subsequent
+        // generateSmsCopy('low_confidence', ...) call must still succeed, since this
+        // test is isolating "parseExpense fails" from "generateSmsCopy fails" (scenario 9,
+        // below, covers the latter — safeGenerateSmsCopy's fallback path).
+        return { ok: true, status: 200, json: async () => chatResponse('Saved under Uncategorized — flagged for review.') };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'something', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a parse failure must still produce a low-confidence-style SMS body, not crash the whole message');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'a parse failure must fall back to pending_review');
+    assert(pendingInsert.params[6] === 0, 'a parse failure must record confidence 0, not a fabricated value');
+  }
+
+  // 8. Missing google_sheet_id on the resolved house: throws (a config gap, not silently swallowed)
+  {
+    const houseWithoutSheet = [{ id: 12, client_id: 1, address: '789 Pine Rd', nickname: null, google_sheet_id: null }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': houseWithoutSheet,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'X', amount: 1, category: 'Other', confidence: 0.99, raw_text: 'X $1' }),
+        'unused'
+      )],
+    ]);
+    let threw = false;
+    try {
+      await processExpenseMessage({
+        fields: { from: '+15551234567', to: '+15559876543', body: 'X $1', media: [] },
+        photoR2Key: null,
+        env: baseEnv(db, bucket),
+        deps: { fetchImpl },
+      });
+    } catch (err) {
+      threw = true;
+      assert(/google_sheet_id/.test(err.message), 'the error must clearly identify the missing google_sheet_id, not fail with a generic message');
+    }
+    assert(threw, 'a house with no Sheet configured must throw rather than silently losing a would-be-filed expense');
+  }
+
+  // 9. generateSmsCopy fails AFTER the write already succeeded (high confidence): the
+  // pipeline must still complete with fallback copy, not throw — a throw here would mean
+  // nothing gets cached (Task 16) and Twilio would retry, re-writing a second Sheet row and
+  // a second expenses row for a receipt that was already successfully filed. This is the
+  // Critical gap the whole-step review caught: safeGenerateSmsCopy's fallback is what
+  // closes it.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc' })],
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: true, status: 200, json: async () => chatResponse(JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' })) };
+        }
+        // The copy-generation call fails — this is the exact scenario the fallback exists for
+        return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      // Non-empty body (rather than '') so this doesn't trip the module's own
+      // `!fields.body && !photoR2Key` early-return guard before reaching the write path —
+      // the mock's canned parse response doesn't depend on the actual text content.
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody === 'Logged: $42.50, Materials, Main St.', 'a generateSmsCopy failure after a successful write must fall back to static confirmation copy with the real values substituted, not throw');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'the write must have already succeeded before the copy-generation failure — this proves the fallback path is reached post-write, not a case where the write itself was skipped');
+  }
+
+  // 10. generateSmsCopy fails on the ambiguous-house (house_selection) path: must still
+  // fall back to static copy, and the pending_review write (house_id null) must have
+  // already happened. Mirrors scenario 9 but for the house_selection call site.
+  {
+    const twoHouses = [singleHouse[0], { id: 11, client_id: 1, address: '456 Oak Ave', nickname: null, google_sheet_id: 'sheet_def' }];
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': twoHouses,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: true, status: 200, json: async () => chatResponse(JSON.stringify({ vendor: 'Lowes', amount: 10, category: 'Materials', confidence: 0.95, raw_text: 'Lowes $10' })) };
+        }
+        // The copy-generation call fails — this is the exact scenario the fallback exists for
+        return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'Lowes $10', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody === 'Which house is this for? Address or nickname works.', 'a generateSmsCopy failure on the ambiguous-house path must fall back to static house_selection copy, not throw');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'the pending_review write must have already succeeded before the copy-generation failure');
+    assert(pendingInsert.params[1] === null, 'the ambiguous-house pending_review write must still record a null house_id');
+  }
+
+  // 11. generateSmsCopy fails on the low-confidence path: must still fall back to static
+  // copy with the real category substituted, and the pending_review write must have already
+  // happened. Mirrors scenario 9 but for the low_confidence call site.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': sender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', async (url, init) => {
+        const body = JSON.parse(init.body);
+        const isParse = body.messages.some((m) => Array.isArray(m.content));
+        if (isParse) {
+          return { ok: true, status: 200, json: async () => chatResponse(JSON.stringify({ vendor: null, amount: null, category: 'Other', confidence: 0.2, raw_text: 'blurry' })) };
+        }
+        // The copy-generation call fails — this is the exact scenario the fallback exists for
+        return { ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) };
+      }],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'some note', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody === "Logged this as Other but wasn't fully sure — flagged it for you to double check.", 'a generateSmsCopy failure on the low-confidence path must fall back to static low_confidence copy with the real category substituted, not throw');
+    const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
+    assert(pendingInsert, 'the pending_review write must have already succeeded before the copy-generation failure');
+  }
+
+  console.log('PASS: expense-flow.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/expense-flow.test.js`
+Expected: fails with a module-not-found error for `../src/expense-flow.js`.
+
+- [x] **Step 3: Write the module**
+
+```js
+// expense-intake/src/expense-flow.js
+import { parseExpense, generateSmsCopy } from './providers/index.js';
+import { findClientByTwilioNumber, findAuthorizedSender, findHousesForClient, insertExpense, insertPendingReview } from './db.js';
+import { getGoogleAccessToken } from './google-auth.js';
+import { appendExpenseRow } from './sheets.js';
+
+const CONFIDENCE_THRESHOLD = 0.7; // tunable — see Step 4's Design decisions note in the plan
+const PENDING_REVIEW_TTL_DAYS = 60; // matches spec's 60-day auto-purge (Cron Trigger is Build Order step 7)
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function pendingReviewExpiresAt() {
+  return new Date(Date.now() + PENDING_REVIEW_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function receiptPhotoUrl(baseUrl, photoR2Key) {
+  return `${baseUrl}/receipts/${encodeURIComponent(photoR2Key)}`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function loadStoredPhotoAsImageInput(bucket, photoR2Key) {
+  const object = await bucket.get(photoR2Key);
+  if (!object) {
+    throw new Error(`Stored receipt photo not found in R2: ${photoR2Key}`);
+  }
+  const bytes = await object.arrayBuffer();
+  return { base64: arrayBufferToBase64(bytes), mediaType: 'image/jpeg' };
+}
+
+// Static fallback copy, used only if the AI copy-generation call itself fails. Deliberately
+// NOT the raw SMS_COPY_ANCHORS strings from providers/shared.js (Step 2) — those contain
+// literal bracket placeholders like "[amount]" meant only as few-shot prompt examples, never
+// meant to be sent to a client verbatim. These fallbacks substitute the real values instead.
+const FALLBACK_SMS_COPY = {
+  confirmation: (vars) => `Logged: $${vars.amount}, ${vars.category}, ${vars.house}.`,
+  low_confidence: (vars) => `Logged this as ${vars.category} but wasn't fully sure — flagged it for you to double check.`,
+  house_selection: () => 'Which house is this for? Address or nickname works.',
+};
+
+// A copy-generation failure must never re-trigger writes that already succeeded. By the
+// time this is called, `insertExpense`/`appendExpenseRow` or `insertPendingReview` have
+// already committed — if generateSmsCopy then throws (rate limit, timeout, network blip,
+// all realistic for an external API call) and that exception were allowed to propagate,
+// handleSmsWebhook's outer catch would turn it into a 500, Twilio would retry the whole
+// webhook, and — since nothing gets cached on a 500 (Task 16) — the retry would reprocess
+// from scratch: a second Sheet row, a second expenses/pending_review row, for one physical
+// receipt. That's the exact duplicate-write problem Task 16 exists to prevent, reopened by
+// an unrelated failure a few lines later. Falling back to static copy instead means the
+// pipeline always finishes, gets cached, and Twilio never retries a message whose writes
+// already succeeded.
+async function safeGenerateSmsCopy(type, vars, env, deps) {
+  try {
+    return await generateSmsCopy(type, vars, env, deps);
+  } catch (err) {
+    console.error('generateSmsCopy failed, using fallback copy', { error: err.message, type });
+    // Defensive: FALLBACK_SMS_COPY only covers the three types this module currently calls
+    // with. If a future call site (e.g. Step 7's monthly_nudge Cron Trigger) invokes this
+    // with a type that hasn't been given a fallback entry, FALLBACK_SMS_COPY[type] is
+    // undefined — calling it would throw a TypeError from inside this catch block itself,
+    // reopening the exact uncaught-exception bug this function exists to close. A generic
+    // last-resort string keeps the guarantee unconditional.
+    const fallback = FALLBACK_SMS_COPY[type];
+    return fallback ? fallback(vars) : 'We logged this — reply if something looks off.';
+  }
+}
+
+export async function processExpenseMessage({ fields, photoR2Key, env, deps = {} }) {
+  if (!fields.body && !photoR2Key) {
+    return { smsBody: '' };
+  }
+
+  const client = await findClientByTwilioNumber(env.DB, fields.to);
+  if (!client) {
+    return { smsBody: '' };
+  }
+
+  const sender = await findAuthorizedSender(env.DB, client.id, fields.from);
+  if (!sender) {
+    return { smsBody: '' };
+  }
+
+  const houses = await findHousesForClient(env.DB, client.id);
+  const image = photoR2Key ? await loadStoredPhotoAsImageInput(env.RECEIPTS_BUCKET, photoR2Key) : null;
+
+  let parsed = null;
+  try {
+    parsed = await parseExpense({ text: fields.body || null, image }, env, deps);
+  } catch (err) {
+    console.error('parseExpense failed', { error: err.message });
+    parsed = null;
+  }
+
+  const houseIsAmbiguous = houses.length !== 1;
+
+  if (houseIsAmbiguous) {
+    await insertPendingReview(env.DB, {
+      clientId: client.id,
+      houseId: null,
+      amountGuess: parsed ? parsed.amount : null,
+      categoryGuess: parsed ? parsed.category : null,
+      photoR2Key,
+      rawText: parsed ? parsed.raw_text : (fields.body || ''),
+      confidence: parsed ? parsed.confidence : 0,
+      expiresAt: pendingReviewExpiresAt(),
+    });
+    const smsBody = await safeGenerateSmsCopy('house_selection', {}, env, deps);
+    return { smsBody };
+  }
+
+  const house = houses[0];
+
+  if (parsed && parsed.confidence >= CONFIDENCE_THRESHOLD && parsed.amount != null) {
+    if (!house.google_sheet_id) {
+      // A house with no Sheet set up is an onboarding gap, not a runtime parsing issue —
+      // surface it loudly (visible in wrangler tail) rather than silently losing the expense
+      // into pending_review, which would mask a real setup bug during manual (pre-step-9) onboarding.
+      throw new Error(`House ${house.id} has no google_sheet_id configured`);
+    }
+    const accessToken = await getGoogleAccessToken({ serviceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON, fetchImpl: deps.fetchImpl });
+    const photoUrl = photoR2Key ? receiptPhotoUrl(env.WORKER_BASE_URL, photoR2Key) : '';
+    await appendExpenseRow({
+      accessToken,
+      spreadsheetId: house.google_sheet_id,
+      row: [todayIso(), parsed.vendor, parsed.amount, parsed.category, parsed.confidence, photoUrl, parsed.raw_text, fields.from, ''],
+      fetchImpl: deps.fetchImpl,
+    });
+    await insertExpense(env.DB, {
+      houseId: house.id,
+      date: todayIso(),
+      vendor: parsed.vendor,
+      amount: parsed.amount,
+      category: parsed.category,
+      confidence: parsed.confidence,
+      photoR2Key,
+      rawText: parsed.raw_text,
+      loggedByPhone: fields.from,
+      notes: '',
+    });
+    const smsBody = await safeGenerateSmsCopy('confirmation', {
+      amount: parsed.amount != null ? parsed.amount.toFixed(2) : '0.00',
+      category: parsed.category,
+      house: house.nickname || house.address,
+    }, env, deps);
+    return { smsBody };
+  }
+
+  await insertPendingReview(env.DB, {
+    clientId: client.id,
+    houseId: house.id,
+    amountGuess: parsed ? parsed.amount : null,
+    categoryGuess: parsed ? parsed.category : null,
+    photoR2Key,
+    rawText: parsed ? parsed.raw_text : (fields.body || ''),
+    confidence: parsed ? parsed.confidence : 0,
+    expiresAt: pendingReviewExpiresAt(),
+  });
+  const smsBody = await safeGenerateSmsCopy('low_confidence', {
+    category: parsed ? parsed.category : 'Uncategorized',
+  }, env, deps);
+  return { smsBody };
+}
+```
+
+- [x] **Step 4: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './expense-flow.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 5: Run test to verify it passes**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all fourteen test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 16: Twilio message deduplication (idempotency against webhook retries)
+
+**Files:**
+- Modify: `expense-intake/src/twilio.js` (add `messageSid` to `extractWebhookFields`)
+- Modify: `expense-intake/test/twilio.test.js`
+- Create: `expense-intake/src/message-dedup.js`
+- Create: `expense-intake/test/fake-kv.js`
+- Create: `expense-intake/test/message-dedup.test.js`
+- Modify: `expense-intake/test/run-all.js`
+- Modify: `expense-intake/wrangler.toml`
+
+**Why this task exists:** Task 15's code review surfaced a real gap — Twilio retries webhook delivery on a 5xx response or a dropped/slow reply, and nothing in the pipeline could tell a retry apart from a genuinely new message. A retry after the Sheet/D1 writes already succeeded (but before Twilio got the 200) would re-run `processExpenseMessage` from scratch: a second Sheet row and a second `expenses`/`pending_review` row for one physical receipt. The project owner confirmed fixing this now rather than deferring it, since it's a financial-data-integrity issue.
+
+**Design:**
+- Twilio sends a unique `MessageSid` (e.g. `SMxxxxxxxx...`) with every inbound webhook — `extractWebhookFields` (Step 3) doesn't currently expose it; this task adds it as a fourth field, additive to the existing `{from, to, body, media}` shape.
+- A new KV namespace, bound as `CONVERSATION_STATE` (matching the name already anticipated in `wrangler.toml`'s Step 1 scaffold comment — Build Order step 5 will reuse the same namespace for house-selection/correction-window state, not a second one), stores `processed:<messageSid> -> <the SMS reply body that was sent>` with a 24-hour TTL — comfortably longer than any realistic Twilio retry window, short enough not to grow the namespace indefinitely.
+- The dedup check happens in `handleSmsWebhook` (Task 17, not yet built) immediately after signature verification, **before** photo storage or any parsing — a cache hit skips the entire pipeline (no re-fetching Twilio media, no re-calling the AI provider, no re-writing to Sheets/D1) and replays the cached reply as TwiML.
+- The cache is written **only after** `processExpenseMessage` fully succeeds, right before responding — never at the start of processing. Marking "done" up front would risk a worse failure mode than duplication: a crash mid-processing would permanently (until TTL) mark a message as handled even though nothing was actually written, silently losing the expense on any subsequent retry. Marking after success means the realistic case this task targets (retry after full success, response just didn't make it back) is closed, while a narrower residual window remains — two invocations processing the *same* still-in-flight message concurrently (e.g. a slow AI call overlapping a retry) could still both complete and duplicate. Closing that fully would need atomic compare-and-swap (KV doesn't offer this; Durable Objects would), which isn't proportionate for this system yet — accepted as a known, documented residual limitation, not silently claimed as "fully solved."
+- A cache write failure (KV hiccup) is caught and logged, not allowed to fail the whole response — losing dedup protection for one message is far better than failing to reply to Twilio at all over a KV outage.
+
+- [x] **Step 1: Write the failing tests**
+
+Add this to `expense-intake/test/twilio.test.js`'s `main()`, right after the existing "message with one photo" block:
+
+```js
+// expense-intake/test/twilio.test.js — add after the "extractWebhookFields: message with one photo" block
+
+  // extractWebhookFields: messageSid is extracted for dedup purposes
+  const withSid = extractWebhookFields({
+    From: '+15551234567', To: '+15559876543', Body: 'hi', NumMedia: '0', MessageSid: 'SM1234567890abcdef',
+  });
+  assert(withSid.messageSid === 'SM1234567890abcdef', 'extractWebhookFields must expose MessageSid as messageSid');
+
+  // extractWebhookFields: missing MessageSid defaults to an empty string, not undefined
+  const noSid = extractWebhookFields({ From: '+1', To: '+2', Body: 'hi', NumMedia: '0' });
+  assert(noSid.messageSid === '', 'a missing MessageSid must default to an empty string');
+```
+
+```js
+// expense-intake/test/fake-kv.js
+// Mirrors worker/test/fake-kv.js's shape, plus call recording (matching this project's
+// fake-r2.js/fake-images.js convention) so tests can assert on put() options like expirationTtl.
+export function createFakeKV(initial = {}) {
+  const store = new Map(Object.entries(initial));
+  const calls = [];
+  return {
+    async get(key, options) {
+      calls.push({ method: 'get', key, options });
+      if (!store.has(key)) return null;
+      const raw = store.get(key);
+      if (options && options.type === 'json') {
+        return JSON.parse(raw);
+      }
+      return raw;
+    },
+    async put(key, value, options) {
+      calls.push({ method: 'put', key, value, options });
+      store.set(key, value);
+    },
+    async delete(key) {
+      calls.push({ method: 'delete', key });
+      store.delete(key);
+    },
+    _store: store,
+    calls,
+  };
+}
+```
+
+```js
+// expense-intake/test/message-dedup.test.js
+import { getCachedReply, cacheReply } from '../src/message-dedup.js';
+import { createFakeKV } from './fake-kv.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+async function main() {
+  // getCachedReply: not yet cached
+  const kv1 = createFakeKV();
+  const miss = await getCachedReply(kv1, 'SM123');
+  assert(miss === null, 'an unprocessed messageSid must return null');
+
+  // cacheReply then getCachedReply: round trip
+  const kv2 = createFakeKV();
+  await cacheReply(kv2, 'SM456', 'Logged: $42.50, Materials, Main St.');
+  const hit = await getCachedReply(kv2, 'SM456');
+  assert(hit === 'Logged: $42.50, Materials, Main St.', 'a cached reply must be returned verbatim on the next lookup');
+
+  // cacheReply stores under a processed:<messageSid> key with an expiration, so the
+  // namespace doesn't grow forever
+  const putCall = kv2.calls.find((c) => c.method === 'put' && c.key === 'processed:SM456');
+  assert(putCall, 'cacheReply must store under a processed:<messageSid> key');
+  assert(putCall.options && putCall.options.expirationTtl > 0, 'cacheReply must set an expirationTtl so dedup entries do not grow the KV namespace forever');
+
+  // missing messageSid is a no-op, never treated as cached (defensive against a
+  // malformed/legacy Twilio payload missing MessageSid entirely)
+  const kv3 = createFakeKV();
+  await cacheReply(kv3, '', 'should not be stored');
+  assert(kv3.calls.every((c) => c.method !== 'put'), 'cacheReply must not write anything for an empty messageSid');
+  const emptyLookup = await getCachedReply(kv3, '');
+  assert(emptyLookup === null, 'getCachedReply must return null for an empty messageSid without querying KV');
+  assert(kv3.calls.every((c) => c.method !== 'get'), 'getCachedReply must not query KV for an empty messageSid');
+
+  console.log('PASS: message-dedup.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/twilio.test.js`
+Expected: fails — `extractWebhookFields` doesn't return `messageSid` yet.
+
+Run: `node expense-intake/test/message-dedup.test.js`
+Expected: fails with a module-not-found error for `../src/message-dedup.js`.
+
+- [x] **Step 3: Add `messageSid` to `src/twilio.js`**
+
+```js
+// expense-intake/src/twilio.js — change only the final `return` line of extractWebhookFields,
+// keep everything else in the file (the signature verification, the MAX_MEDIA_ITEMS cap, etc.) unchanged
+
+  return { from: params.From || '', to: params.To || '', body: params.Body || '', media, messageSid: params.MessageSid || '' };
+```
+
+- [x] **Step 4: Write `src/message-dedup.js`**
+
+```js
+// expense-intake/src/message-dedup.js
+const REPLY_CACHE_TTL_SECONDS = 24 * 60 * 60; // comfortably longer than any realistic Twilio retry window
+
+export async function getCachedReply(kv, messageSid) {
+  if (!messageSid) return null;
+  return kv.get(`processed:${messageSid}`);
+}
+
+export async function cacheReply(kv, messageSid, smsBody) {
+  if (!messageSid) return;
+  await kv.put(`processed:${messageSid}`, smsBody, { expirationTtl: REPLY_CACHE_TTL_SECONDS });
+}
+```
+
+- [x] **Step 5: Wire the new tests into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './expense-flow.test.js';
+import './message-dedup.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [x] **Step 6: Run tests to verify they pass**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all fifteen test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 7: Add the KV namespace binding to `wrangler.toml`**
+
+```toml
+# expense-intake/wrangler.toml — add this block (keep everything already there)
+
+[[kv_namespaces]]
+binding = "CONVERSATION_STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+```
+
+Also update the trailing comment (it currently says KV is "added in later Build Order steps (5-7)" — that's no longer accurate now that this task adds it):
+
+```toml
+# expense-intake/wrangler.toml — replace the trailing comment
+
+# CONVERSATION_STATE (above) is also used by Build Order step 5 for house-selection
+# pending state and the 10-minute correction window — one namespace, multiple key
+# prefixes ("processed:", and step 5's own prefix once it exists).
+# Routes and [[triggers]] cron entries are added in later Build Order steps (7-ish)
+# once the code that uses them exists.
+```
+
+- [x] **Step 8: Stage the change**
+
+```bash
+git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js expense-intake/src/message-dedup.js expense-intake/test/fake-kv.js expense-intake/test/message-dedup.test.js expense-intake/test/run-all.js expense-intake/wrangler.toml
+```
+
+---
+
+### Task 17: Wire the parsing pipeline into `handleSmsWebhook`, bindings, and docs
+
+**Files:**
+- Modify: `expense-intake/src/handlers.js` (rewrite `handleSmsWebhook`; `handleGetReceipt` — already updated by Task 14's review fixes — is carried forward unchanged)
+- Modify: `expense-intake/src/index.js` (pass `env` instead of individual bindings for `/sms`; the `GET /receipts/:key` route — already updated by Task 14's review fixes — is carried forward unchanged)
+- Modify: `expense-intake/test/handlers.test.js` (full replacement)
+- Modify: `expense-intake/test/index.test.js` (full replacement)
+- Modify: `expense-intake/wrangler.toml`
+- Modify: `expense-intake/README.md`
+
+This changes `handleSmsWebhook`'s signature from Step 3's individually-destructured bindings (`accountSid, authToken, imagesBinding, bucket`) to taking `env` directly — a deliberate evolution now that this function's dependency surface has grown to include D1, the AI provider abstraction, Google auth, Sheets, and now KV (Task 16), on top of what it already needed. Continuing to destructure an ever-growing list of individual parameters would fight the pattern `src/providers/index.js` (Step 2) already established of taking `(input, env, deps)`. This task also wires in Task 16's dedup check/cache — the two were originally planned as one task, then split so the dedup logic (KV plumbing, `messageSid` capture) could be built and reviewed as its own self-contained unit before folding it into the rewrite that was already touching this exact function.
+
+**Note on `handleGetReceipt`/`GET /receipts/:key`:** Task 14 already shipped both of these, and a code-review cycle already hardened them (a `receipts/` key-prefix guard in `handleGetReceipt`, and a try/catch around `decodeURIComponent` in the route). The code blocks below show their CURRENT, already-fixed form — copy them as-is, don't reconstruct from Task 14's original (pre-fix) plan text, which would silently revert those fixes.
+
+- [x] **Step 1: Write the failing tests**
+
+```js
+// expense-intake/test/handlers.test.js — full replacement
+import crypto from 'node:crypto';
+import { handleSmsWebhook, handleGetReceipt } from '../src/handlers.js';
+import { createFakeImagesBinding } from './fake-images.js';
+import { createFakeR2Bucket } from './fake-r2.js';
+import { createFakeD1 } from './fake-d1.js';
+import { createFakeKV } from './fake-kv.js';
+import { getCachedReply } from '../src/message-dedup.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function computeTwilioSignature(url, params, authToken) {
+  const sortedKeys = Object.keys(params).sort();
+  let stringToSign = url;
+  for (const key of sortedKeys) {
+    stringToSign += key + params[key];
+  }
+  return crypto.createHmac('sha1', authToken).update(stringToSign).digest('base64');
+}
+
+function fakeFetch(ok, status, body) {
+  return async () => ({ ok, status, json: async () => body });
+}
+
+function baseEnv(overrides = {}) {
+  return {
+    TWILIO_ACCOUNT_SID: 'AC_test',
+    TWILIO_AUTH_TOKEN: 'test_auth_token',
+    IMAGES: createFakeImagesBinding(new ArrayBuffer(0)),
+    RECEIPTS_BUCKET: createFakeR2Bucket(),
+    DB: createFakeD1({ 'SELECT * FROM clients WHERE twilio_number = ?': null }),
+    CONVERSATION_STATE: createFakeKV(),
+    ...overrides,
+  };
+}
+
+async function main() {
+  const url = 'https://expense-intake.example.com/sms';
+  const authToken = 'test_auth_token';
+
+  // invalid signature -> 403, nothing stored, processExpenseMessage never reached
+  {
+    const env = baseEnv();
+    const result = await handleSmsWebhook({
+      url, bodyText: 'From=%2B1555&To=%2B1556&Body=hi&NumMedia=0', signature: 'bad-sig', env,
+    });
+    assert(result.status === 403, 'an invalid signature must return 403');
+  }
+
+  // valid signature, unknown client -> 200, empty TwiML (silent ack from processExpenseMessage);
+  // also confirms a successful (even silently-empty) response gets cached under its messageSid
+  {
+    const params = { From: '+15551234567', To: '+19998887777', Body: 'hello', NumMedia: '0', MessageSid: 'SM_unknown_client' };
+    const bodyText = new URLSearchParams(params).toString();
+    const signature = computeTwilioSignature(url, params, authToken);
+    const kv = createFakeKV();
+    const env = baseEnv({ DB: createFakeD1({ 'SELECT * FROM clients WHERE twilio_number = ?': null }), CONVERSATION_STATE: kv });
+    const result = await handleSmsWebhook({ url, bodyText, signature, env });
+    assert(result.status === 200 && result.contentType === 'text/xml' && result.body === '<Response></Response>', 'an unrecognized client must still 200 with an empty TwiML acknowledgment');
+    const cached = await getCachedReply(kv, 'SM_unknown_client');
+    assert(cached === '', 'a successfully-handled message (even a silent ack) must be cached under its messageSid so a Twilio retry replays it instead of reprocessing');
+  }
+
+  // photo storage failure -> 500, processExpenseMessage never reached, and nothing gets
+  // cached (a failed attempt must be retryable for real, not permanently marked "done")
+  {
+    const params = {
+      From: '+15551234567', To: '+15559876543', Body: '', NumMedia: '1',
+      MediaUrl0: 'https://api.twilio.com/media/ME_missing', MediaContentType0: 'image/jpeg', MessageSid: 'SM_photo_fail',
+    };
+    const bodyText = new URLSearchParams(params).toString();
+    const signature = computeTwilioSignature(url, params, authToken);
+    const failBucket = createFakeR2Bucket();
+    const kv = createFakeKV();
+    const env = baseEnv({ RECEIPTS_BUCKET: failBucket, CONVERSATION_STATE: kv });
+    const result = await handleSmsWebhook({ url, bodyText, signature, env, deps: { fetchImpl: fakeFetch(false, 404, null) } });
+    assert(result.status === 500, 'a failed photo storage must still return 500 so Twilio retries delivery');
+    assert(failBucket._store.size === 0, 'nothing should be stored in R2 when photo storage fails');
+    assert((await getCachedReply(kv, 'SM_photo_fail')) === null, 'a failed attempt must not be cached, so a real Twilio retry can actually retry it');
+  }
+
+  // processExpenseMessage throwing -> 500 (e.g. a house with no google_sheet_id, or a DB
+  // outage), and nothing gets cached, same reasoning as the photo-storage-failure case
+  {
+    const params = { From: '+15551234567', To: '+15559876543', Body: 'hello', NumMedia: '0', MessageSid: 'SM_process_fail' };
+    const bodyText = new URLSearchParams(params).toString();
+    const signature = computeTwilioSignature(url, params, authToken);
+    const throwingDb = {
+      prepare() {
+        return { bind() { return this; }, async first() { throw new Error('DB unavailable'); } };
+      },
+    };
+    const kv = createFakeKV();
+    const env = baseEnv({ DB: throwingDb, CONVERSATION_STATE: kv });
+    const result = await handleSmsWebhook({ url, bodyText, signature, env });
+    assert(result.status === 500, 'an unexpected error while processing the message must return 500, not crash the Worker');
+    assert((await getCachedReply(kv, 'SM_process_fail')) === null, 'a failed attempt must not be cached');
+  }
+
+  // repeated MessageSid (Twilio retry after we already fully processed it) -> replay the
+  // cached reply without touching D1/R2/the AI provider at all
+  {
+    const params = { From: '+15551234567', To: '+15559876543', Body: 'hello', NumMedia: '0', MessageSid: 'SM_retry_test' };
+    const bodyText = new URLSearchParams(params).toString();
+    const signature = computeTwilioSignature(url, params, authToken);
+    const throwingDb = {
+      prepare() {
+        throw new Error('D1 should never be queried on a dedup cache hit');
+      },
+    };
+    const kv = createFakeKV({ 'processed:SM_retry_test': 'Logged: $42.50, Materials, Main St.' });
+    const env = baseEnv({ DB: throwingDb, CONVERSATION_STATE: kv });
+    const result = await handleSmsWebhook({ url, bodyText, signature, env });
+    assert(result.status === 200 && result.contentType === 'text/xml', 'a cache hit must still return 200 TwiML');
+    assert(result.body === '<Response><Message>Logged: $42.50, Materials, Main St.</Message></Response>', 'a cache hit must replay the exact cached reply');
+  }
+
+  // handleGetReceipt: found
+  {
+    const bucket = createFakeR2Bucket();
+    await bucket.put('receipts/x/1.jpg', new ArrayBuffer(4), { httpMetadata: { contentType: 'image/jpeg' } });
+    const found = await handleGetReceipt({ key: 'receipts/x/1.jpg', bucket });
+    assert(found.status === 200 && found.contentType === 'image/jpeg', 'a stored photo must be served with its stored content type');
+  }
+
+  // handleGetReceipt: not found
+  {
+    const bucket = createFakeR2Bucket();
+    const missing = await handleGetReceipt({ key: 'receipts/nope.jpg', bucket });
+    assert(missing.status === 404, 'a missing key must 404');
+  }
+
+  console.log('PASS: handlers.test.js');
+}
+
+await main();
+```
+
+```js
+// expense-intake/test/index.test.js — full replacement
+import crypto from 'node:crypto';
+import workerModule from '../src/index.js';
+import { createFakeImagesBinding } from './fake-images.js';
+import { createFakeR2Bucket } from './fake-r2.js';
+import { createFakeD1 } from './fake-d1.js';
+import { createFakeKV } from './fake-kv.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function computeTwilioSignature(url, params, authToken) {
+  const sortedKeys = Object.keys(params).sort();
+  let stringToSign = url;
+  for (const key of sortedKeys) {
+    stringToSign += key + params[key];
+  }
+  return crypto.createHmac('sha1', authToken).update(stringToSign).digest('base64');
+}
+
+async function main() {
+  // unrouted requests still 404
+  let request = new Request('https://expense-intake.example.com/', { method: 'GET' });
+  let response = await workerModule.fetch(request, {});
+  assert(response.status === 404, 'unrouted requests should 404');
+
+  const authToken = 'test_auth_token';
+  const smsUrl = 'https://expense-intake.example.com/sms';
+  function baseEnv(overrides = {}) {
+    return {
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: authToken,
+      IMAGES: createFakeImagesBinding(new ArrayBuffer(0)),
+      RECEIPTS_BUCKET: createFakeR2Bucket(),
+      DB: createFakeD1({ 'SELECT * FROM clients WHERE twilio_number = ?': null }),
+      CONVERSATION_STATE: createFakeKV(),
+      ...overrides,
+    };
+  }
+
+  // POST /sms with an invalid signature is rejected, through the real routing layer
+  request = new Request(smsUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': 'not-a-real-signature' },
+    body: 'From=%2B15551234567&To=%2B15559876543&Body=hello&NumMedia=0',
+  });
+  response = await workerModule.fetch(request, baseEnv());
+  assert(response.status === 403, 'an invalid Twilio signature must be rejected with 403 through the real route');
+
+  // POST /sms, text-only message with a valid signature, unknown client -> silent TwiML ack
+  const textParams = { From: '+15551234567', To: '+15559876543', Body: 'hello', NumMedia: '0', MessageSid: 'SM_index_text' };
+  const textSig = computeTwilioSignature(smsUrl, textParams, authToken);
+  request = new Request(smsUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': textSig },
+    body: new URLSearchParams(textParams).toString(),
+  });
+  response = await workerModule.fetch(request, baseEnv());
+  assert(response.status === 200, 'a validly signed text-only message should return 200 through the real route');
+  assert(response.headers.get('Content-Type') === 'text/xml', 'the response to Twilio must be TwiML (text/xml)');
+  const textBody = await response.text();
+  assert(textBody.includes('<Response>'), 'the response body must be valid (if minimal) TwiML');
+
+  // GET /receipts/:key through the real routing layer
+  const receiptBucket = createFakeR2Bucket();
+  await receiptBucket.put('receipts/x/1.jpg', new ArrayBuffer(4), { httpMetadata: { contentType: 'image/jpeg' } });
+  request = new Request('https://expense-intake.example.com/receipts/' + encodeURIComponent('receipts/x/1.jpg'), { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv({ RECEIPTS_BUCKET: receiptBucket }));
+  assert(response.status === 200 && response.headers.get('Content-Type') === 'image/jpeg', 'a stored receipt photo must be served through the real GET /receipts/:key route');
+
+  // GET /receipts/:key for a missing key -> 404
+  request = new Request('https://expense-intake.example.com/receipts/' + encodeURIComponent('receipts/nope.jpg'), { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv());
+  assert(response.status === 404, 'a missing receipt key must 404 through the real route');
+
+  console.log('PASS: index.test.js');
+}
+
+await main();
+```
+
+- [x] **Step 2: Run tests to verify they fail**
+
+Run: `node expense-intake/test/handlers.test.js`
+Expected: fails — `handleSmsWebhook`'s current (Step 3) signature doesn't accept `env`, so calls with the old individually-destructured params are gone from the test and the new calls don't match the current implementation's expectations (e.g. `env.DB`/`env.CONVERSATION_STATE` are undefined inside the still-old `handleSmsWebhook`, or the unknown-client case doesn't get the empty-TwiML behavior since `processExpenseMessage` isn't wired in yet).
+
+Run: `node expense-intake/test/index.test.js`
+Expected: fails for the same underlying reason — `index.js` still calls `handleSmsWebhook` with Step 3's old individual-params signature.
+
+- [x] **Step 3: Rewrite `src/handlers.js`**
+
+```js
+// expense-intake/src/handlers.js — full replacement
+import { parseFormBody, verifyTwilioSignature, extractWebhookFields } from './twilio.js';
+import { generateReceiptKey, storeReceiptPhoto } from './receipt-storage.js';
+import { processExpenseMessage } from './expense-flow.js';
+import { buildTwiml } from './twiml.js';
+import { getCachedReply, cacheReply } from './message-dedup.js';
+
+export async function handleSmsWebhook({ url, bodyText, signature, env, deps = {} }) {
+  const params = parseFormBody(bodyText);
+  const valid = await verifyTwilioSignature({ url, params, signature, authToken: env.TWILIO_AUTH_TOKEN });
+  if (!valid) {
+    return { status: 403, contentType: 'text/plain', body: 'Forbidden' };
+  }
+
+  const fields = extractWebhookFields(params);
+
+  const cachedReply = await getCachedReply(env.CONVERSATION_STATE, fields.messageSid);
+  if (cachedReply !== null) {
+    // Twilio retried a delivery we already fully processed (our first response was likely
+    // slow or dropped) — replay the same reply instead of re-parsing, re-storing the photo,
+    // and re-writing to the Sheet/D1 a second time for one physical receipt.
+    return { status: 200, contentType: 'text/xml', body: buildTwiml(cachedReply) };
+  }
+
+  let photoR2Key = null;
+  if (fields.media.length > 0) {
+    photoR2Key = generateReceiptKey(fields.to);
+    try {
+      await storeReceiptPhoto({
+        mediaUrl: fields.media[0].url,
+        accountSid: env.TWILIO_ACCOUNT_SID,
+        authToken: env.TWILIO_AUTH_TOKEN,
+        imagesBinding: env.IMAGES,
+        bucket: env.RECEIPTS_BUCKET,
+        key: photoR2Key,
+        fetchImpl: deps.fetchImpl,
+      });
+    } catch (err) {
+      console.error('Failed to store receipt photo', { error: err.message });
+      return { status: 500, contentType: 'text/plain', body: 'Failed to store photo' };
+    }
+  }
+
+  try {
+    const { smsBody } = await processExpenseMessage({ fields, photoR2Key, env, deps });
+    try {
+      await cacheReply(env.CONVERSATION_STATE, fields.messageSid, smsBody);
+    } catch (err) {
+      // Losing dedup protection for one message is far better than failing the whole
+      // response over a KV hiccup — log it and still reply normally.
+      console.error('Failed to cache reply for dedup', { error: err.message });
+    }
+    return { status: 200, contentType: 'text/xml', body: buildTwiml(smsBody) };
+  } catch (err) {
+    console.error('Failed to process expense message', { error: err.message });
+    return { status: 500, contentType: 'text/plain', body: 'Failed to process message' };
+  }
+}
+
+// This route is deliberately public and unauthenticated — the Sheet's Photo column links
+// directly to it. Trust relies on the R2 key's embedded UUID being practically unguessable,
+// not on any auth check here. Confirmed project-owner decision (see Step 4's Design
+// decisions note in the plan) — not an oversight.
+export async function handleGetReceipt({ key, bucket }) {
+  if (!key.startsWith('receipts/')) {
+    return { status: 404, contentType: 'text/plain', body: 'Not found' };
+  }
+  const object = await bucket.get(key);
+  if (!object) {
+    return { status: 404, contentType: 'text/plain', body: 'Not found' };
+  }
+  const bytes = await object.arrayBuffer();
+  const contentType = (object.httpMetadata && object.httpMetadata.contentType) || 'image/jpeg';
+  return { status: 200, contentType, body: bytes };
+}
+```
+
+- [x] **Step 4: Update `src/index.js`**
+
+```js
+// expense-intake/src/index.js — full replacement
+import { handleSmsWebhook, handleGetReceipt } from './handlers.js';
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (request.method === 'POST' && url.pathname === '/sms') {
+      const bodyText = await request.text();
+      const signature = request.headers.get('X-Twilio-Signature') || '';
+      const result = await handleSmsWebhook({ url: request.url, bodyText, signature, env });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    if (request.method === 'GET' && url.pathname.startsWith('/receipts/')) {
+      let key;
+      try {
+        key = decodeURIComponent(url.pathname.slice('/receipts/'.length));
+      } catch {
+        return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain' } });
+      }
+      const result = await handleGetReceipt({ key, bucket: env.RECEIPTS_BUCKET });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    return new Response(JSON.stringify({ error: 'not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+};
+```
+
+- [x] **Step 5: Run tests to verify they pass**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all fifteen test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [x] **Step 6: Add `WORKER_BASE_URL` to `wrangler.toml`**
+
+```toml
+# expense-intake/wrangler.toml — update the [vars] block (keep AI_PROVIDER, add WORKER_BASE_URL)
+
+[vars]
+AI_PROVIDER = "openrouter"
+WORKER_BASE_URL = "https://expense-intake.venturesdatasolutions.workers.dev"
+```
+
+- [x] **Step 7: Update the README**
+
+```markdown
+// expense-intake/README.md — update the "## Routes" section, replace "## Status", and
+// add a new section after "## Twilio secrets"
+
+## Routes
+
+- `POST /sms` — Twilio inbound SMS/MMS webhook. Validates `X-Twilio-Signature`,
+  stores any attached photo (resized/recompressed, only the first attached
+  photo is processed if a message has multiple) to R2, parses/categorizes
+  the expense, resolves the client and house, and either files it to that
+  house's Google Sheet + the `expenses` table (high confidence, exactly one
+  house) or holds it in `pending_review` (low confidence, or an ambiguous
+  house) — replying with the appropriate confirmation/low-confidence/
+  house-selection SMS copy either way.
+- `GET /receipts/:key` — serves a stored receipt photo directly from R2, no
+  authentication. Used by the "Photo" column link in each house's Sheet.
+
+## Status
+
+Build Order steps 1-4: repo scaffolding, D1 schema, the provider
+abstraction, the Twilio inbound webhook with R2 photo storage, and the full
+happy-path pipeline — parse, categorize, file to Sheets/D1 or
+`pending_review`, and reply with confirmation copy, with dedup protection
+against Twilio's own webhook retries (a repeated delivery of a message
+already fully processed replays the cached reply instead of reprocessing).
+Not yet built: the interactive house-selection reply flow and 10-minute
+correction window (step 5 — right now, an ambiguous-house message is held
+in `pending_review` with a prompt, but a client's reply to that prompt
+isn't yet matched back to it — step 5 will reuse the same `CONVERSATION_STATE`
+KV namespace this step introduced), the `pending` retrieval command
+(step 6), Cron Triggers for the daily purge and monthly nudge (step 7),
+save-contact onboarding (step 8), and the onboarding CLI script (step 9) —
+houses currently need a `google_sheet_id` set via manual SQL before this
+pipeline can file to their Sheet.
+
+## KV namespace setup (one-time, per environment)
+
+\`\`\`bash
+npx wrangler kv namespace create CONVERSATION_STATE
+\`\`\`
+
+Paste the printed `id` into `wrangler.toml`, replacing
+`REPLACE_WITH_KV_NAMESPACE_ID`.
+
+## Google service account secret (one-time, per environment)
+
+\`\`\`bash
+npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON
+\`\`\`
+
+Paste the **entire contents** of the service account's downloaded JSON key
+file (Google Cloud Console → IAM & Admin → Service Accounts → Keys) as a
+single value. That service account also needs to be shared as an Editor on
+every house's Google Sheet — Sheets created by hand for manual testing
+before Build Order step 9's onboarding script exists must be shared with
+the service account's `client_email` individually, the same way you'd
+share a Sheet with a person.
+
+The confidence threshold that decides "confirmation" vs. "pending review"
+is `CONFIDENCE_THRESHOLD` in `src/expense-flow.js` (currently `0.7`) —
+tune it after seeing how real receipts parse.
+```
+
+- [x] **Step 8: Stage the change**
+
+```bash
+git add expense-intake/src/handlers.js expense-intake/src/index.js expense-intake/test/handlers.test.js expense-intake/test/index.test.js expense-intake/wrangler.toml expense-intake/README.md
+```
+
+---
+
+## Self-Review — Step 4
+
+**Spec coverage for Step 4:** MESSAGE FLOW step 3 ("Call parseExpense() → vendor, amount, suggested category, confidence") → Task 15's `processExpenseMessage`, which is the only caller of `parseExpense` in this step. MESSAGE FLOW step 5 ("High confidence → write row directly to that house's Google Sheet, send confirmation SMS") → Task 15's confidence-branch writing to `expenses` + Task 12's Sheets append + Task 17's TwiML `<Message>` reply. MESSAGE FLOW step 6 ("Low confidence → write to pending_review only. Never touches the visible Sheet") → Task 15's low-confidence branch, and Task 15's test explicitly asserts no Sheets call happens on that path. GOOGLE SHEETS FORMAT (columns, service account auth, "shared with the client's email as Viewer") → Task 11 (auth), Task 12 (the exact 9-column row order matching Date\|Vendor\|Amount\|Category\|Confidence\|Photo\|Raw Text\|Logged By\|Notes) — sharing the Sheet with the client as Viewer is an onboarding action (Build Order step 9), out of scope for this step, which only writes to an already-shared Sheet. SMS COPY section's `confirmation`/`low_confidence`/`house_selection` copy types (already built in Step 2) → all three are exercised by Task 15's branches. SECRETS section's `GOOGLE_SERVICE_ACCOUNT_JSON` → used for the first time in Task 11, documented in Task 17's README update. Task 16 (message deduplication) isn't derived from the original spec at all — it's a project-owner-confirmed addition in response to a real gap Task 15's code review surfaced (Twilio retry duplication), not a spec requirement, and is called out as such in its own task text.
+
+**Not yet in scope, intentionally (later Build Order steps):** the interactive KV-backed house-selection reply and 10-minute correction window (step 5 — which will reuse the `CONVERSATION_STATE` KV namespace Task 16 introduces, not add a second one), the `pending` retrieval command (step 6), Cron Triggers (step 7), save-contact onboarding (step 8), and the onboarding CLI script (step 9, meaning `houses.google_sheet_id` must currently be set by hand). The Design decisions note above explains why house ambiguity is handled as a `pending_review` write rather than a real interactive prompt in this step.
+
+**Placeholder scan:** No TBD/TODO markers. `WORKER_BASE_URL` uses the real, already-deployed URL (`https://expense-intake.venturesdatasolutions.workers.dev`) confirmed earlier in this project's setup, not a placeholder. `REPLACE_WITH_KV_NAMESPACE_ID` in Task 16's `wrangler.toml` addition is an intentional, documented placeholder (same pattern as Step 1's `REPLACE_WITH_D1_DATABASE_ID` and the original scaffold's KV placeholder note) — the real ID only exists after `wrangler kv namespace create` is run against the actual Cloudflare account, and Task 17's README update spells out that exact command.
+
+**Type consistency:** `processExpenseMessage`'s `{ fields, photoR2Key, env, deps }` parameter shape is used identically by Task 15 itself and by Task 17's `handleSmsWebhook`. `fields` (`{from, to, body, media, messageSid}`) matches `extractWebhookFields`'s output exactly, including the `messageSid` field Task 16 adds to it — `processExpenseMessage` doesn't touch `messageSid` at all (it's only consumed by `handleSmsWebhook`'s dedup check, one layer up), so widening `fields`'s shape didn't require touching Task 15's already-approved code. `env`'s expected keys (`DB`, `RECEIPTS_BUCKET`, `AI_PROVIDER`, `OPENROUTER_API_KEY`/`ANTHROPIC_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `WORKER_BASE_URL`, `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`, `IMAGES`, and now `CONVERSATION_STATE`) are consistent across Task 15's `processExpenseMessage`, Task 17's `handleSmsWebhook`, and `src/index.js`'s real binding wiring — no key is read under one name in one file and a different name elsewhere. `db.js`'s five functions (Task 10) are called with the same parameter names/order everywhere they're used in Task 15. `message-dedup.js`'s `getCachedReply`/`cacheReply` (Task 16) are called with the same `(kv, messageSid, ...)` argument order in both their own tests and Task 17's `handleSmsWebhook`. The `{status, contentType, body}` handler-result shape from Step 3 is preserved unchanged by `handleSmsWebhook`, `handleGetReceipt`, and the new dedup-cache-hit early return.

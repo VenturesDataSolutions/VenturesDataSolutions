@@ -61,5 +61,5 @@ export function extractWebhookFields(params) {
       media.push({ url: mediaUrl, contentType: params[`MediaContentType${i}`] || 'application/octet-stream' });
     }
   }
-  return { from: params.From || '', to: params.To || '', body: params.Body || '', media };
+  return { from: params.From || '', to: params.To || '', body: params.Body || '', media, messageSid: params.MessageSid || '' };
 }

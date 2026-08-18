@@ -5,10 +5,11 @@ compatibility_date = "2026-08-17"
 [[d1_databases]]
 binding = "DB"
 database_name = "expense-intake-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "162a1b94-cfbe-4321-81ea-584fb7173a7c"
 
 [vars]
 AI_PROVIDER = "openrouter"
+WORKER_BASE_URL = "https://expense-intake.venturesdatasolutions.workers.dev"
 
 [[r2_buckets]]
 binding = "RECEIPTS_BUCKET"
@@ -17,6 +18,12 @@ bucket_name = "expense-intake-receipts"
 [images]
 binding = "IMAGES"
 
-# KV namespace (conversation state: house-selection pending, correction window),
-# routes, and [[triggers]] cron entries are added in later Build Order steps
-# (5-7) once the code that uses them exists.
+[[kv_namespaces]]
+binding = "CONVERSATION_STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# CONVERSATION_STATE (above) is also used by Build Order step 5 for house-selection
+# pending state and the 10-minute correction window — one namespace, multiple key
+# prefixes ("processed:", and step 5's own prefix once it exists).
+# Routes and [[triggers]] cron entries are added in later Build Order steps (7-ish)
+# once the code that uses them exists.

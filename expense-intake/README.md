@@ -12,20 +12,35 @@ implementation plan and Build Order.
 ## Routes
 
 - `POST /sms` — Twilio inbound SMS/MMS webhook. Validates `X-Twilio-Signature`,
-  stores any attached photo (resized/recompressed) to R2, and responds with
-  TwiML (only the first attached photo is processed if a message has
-  multiple). Parsing, categorization, and confirmation SMS content are Build
-  Order step 4 — this route currently stores photos and acknowledges
-  text-only messages without doing anything else with them yet.
+  stores any attached photo (resized/recompressed, only the first attached
+  photo is processed if a message has multiple) to R2, parses/categorizes
+  the expense, resolves the client and house, and either files it to that
+  house's Google Sheet + the `expenses` table (high confidence, exactly one
+  house) or holds it in `pending_review` (low confidence, or an ambiguous
+  house) — replying with the appropriate confirmation/low-confidence/
+  house-selection SMS copy either way. A repeated Twilio delivery of a
+  message already fully processed (identified by `MessageSid`) replays the
+  cached reply instead of reprocessing.
+- `GET /receipts/:key` — serves a stored receipt photo directly from R2, no
+  authentication. Used by the "Photo" column link in each house's Sheet.
 
 ## Status
 
-Build Order steps 1-3: repo scaffolding, `wrangler.toml`, the D1 schema
-migration, the provider abstraction (`src/providers/`, unit-tested
-standalone, not yet wired into any route), and the Twilio inbound webhook
-(`POST /sms`) with signature verification and R2 photo storage. No parsing,
-categorization, Sheets writes, or confirmation SMS content yet — those are
-Build Order step 4.
+Build Order steps 1-4: repo scaffolding, D1 schema, the provider
+abstraction, the Twilio inbound webhook with R2 photo storage, and the full
+happy-path pipeline — parse, categorize, file to Sheets/D1 or
+`pending_review`, and reply with confirmation copy, with dedup protection
+against Twilio's own webhook retries (a repeated delivery of a message
+already fully processed replays the cached reply instead of reprocessing).
+Not yet built: the interactive house-selection reply flow and 10-minute
+correction window (step 5 — right now, an ambiguous-house message is held
+in `pending_review` with a prompt, but a client's reply to that prompt
+isn't yet matched back to it — step 5 will reuse the same `CONVERSATION_STATE`
+KV namespace this step introduced), the `pending` retrieval command
+(step 6), Cron Triggers for the daily purge and monthly nudge (step 7),
+save-contact onboarding (step 8), and the onboarding CLI script (step 9) —
+houses currently need a `google_sheet_id` set via manual SQL before this
+pipeline can file to their Sheet.
 
 ## Running the Worker's own tests
 
@@ -100,3 +115,30 @@ under "Always Use HTTPS") will break signature verification, since Twilio
 signs the URL it originally POSTed to, not any redirected version. This is
 a common way signature checks silently fail in production: every inbound
 message 403s with no obvious cause from the Worker side alone.
+
+## KV namespace setup (one-time, per environment)
+
+```bash
+npx wrangler kv namespace create CONVERSATION_STATE
+```
+
+Paste the printed `id` into `wrangler.toml`, replacing
+`REPLACE_WITH_KV_NAMESPACE_ID`.
+
+## Google service account secret (one-time, per environment)
+
+```bash
+npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON
+```
+
+Paste the **entire contents** of the service account's downloaded JSON key
+file (Google Cloud Console → IAM & Admin → Service Accounts → Keys) as a
+single value. That service account also needs to be shared as an Editor on
+every house's Google Sheet — Sheets created by hand for manual testing
+before Build Order step 9's onboarding script exists must be shared with
+the service account's `client_email` individually, the same way you'd
+share a Sheet with a person.
+
+The confidence threshold that decides "confirmation" vs. "pending review"
+is `CONFIDENCE_THRESHOLD` in `src/expense-flow.js` (currently `0.7`) —
+tune it after seeing how real receipts parse.
