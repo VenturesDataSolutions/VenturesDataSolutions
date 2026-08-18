@@ -8461,3 +8461,800 @@ git add expense-intake/src/index.js expense-intake/test/index.test.js expense-in
 **Placeholder scan:** No TBD/TODO markers. No new secrets or bindings were introduced — `DB`, `WORKER_BASE_URL`, and the Twilio secrets all already existed; Task 44 explicitly calls out that `wrangler.toml` needs no change this step, rather than silently omitting a step other Build Order steps have had.
 
 **Type consistency:** `buildVCard({ businessName, phoneNumber })` (Task 39) is called with those exact field names, sourced from `client.business_name`/`client.twilio_number`, in Task 43's `handleGetContactCard` — no mismatch between the D1 column names and the function's parameter names. `sendSms`'s new `mediaUrl` parameter (Task 41) is optional and additive; every pre-existing call site (Step 7's `sendMonthlyNudges`) continues to omit it and is unaffected, verified by Task 41's own test asserting the earlier plain-SMS call in that same test file never gained a `MediaUrl` field. `maybeSendContactCard`'s `{ client, sender, fields, env, deps }` parameter shape matches the exact variable names already in scope at its call site inside `processExpenseMessage` — no renaming or repacking needed. `findClientById`/`markContactCardSent` (Task 38) are called with the same argument order in both their own tests and Task 42/43's usage.
+
+---
+
+## Step 9: Onboarding CLI script
+
+**Design spec:** `docs/superpowers/specs/2026-08-18-expense-intake-onboarding-cli-design.md` (approved by the project owner). This is the final Build Order step: a locally-run script that onboards a new client end-to-end — creates the `clients`/`houses`/`authorized_senders` D1 rows, and auto-creates + shares each house's Google Sheet — replacing the manual SQL and manual Sheet setup every prior step's README has pointed at as a stopgap.
+
+**Interface (from the design spec):** `node expense-intake/scripts/onboard-client.js <config.json> <service-account.json> [--local]`. The pure/testable logic (`validateConfig`, `createHouseSheets`, `buildOnboardingSql`, `onboardClient`) lives in a new `src/onboarding.js`; the CLI script itself is a thin entrypoint that reads the two files, calls `onboardClient` with real dependencies (including a `runWrangler` that writes the generated SQL to a temp file and shells out to `wrangler d1 execute --file=`), and prints a summary.
+
+**Design decisions locked in for this step:**
+- Twilio phone number provisioning stays manual — the config's `twilioNumber` is an already-purchased number, per the design spec's explicit scope boundary.
+- `getGoogleAccessToken` gains an optional `scope` parameter (default: the existing `SHEETS_SCOPE`, so every Worker-runtime call site is byte-for-byte unchanged) so this script can request the additional `DRIVE_FILE_SCOPE` needed to share a newly created Sheet — least-privilege Drive access (files the service account itself created), not the blanket `drive` scope.
+- D1 writes go through one `wrangler d1 execute --file=<tmp>.sql` call per onboarding run, not `--command`, to avoid shell-escaping/length limits across multiple houses/senders in one invocation. Houses/authorized_senders `INSERT`s resolve `client_id` via a `(SELECT id FROM clients WHERE twilio_number = ?)` subquery rather than a captured `last_row_id`, since `twilio_number` is `UNIQUE` and known upfront from the config — `wrangler d1 execute --file` doesn't hand back a per-statement insert id this script could otherwise capture.
+- `onboardClient`'s `runWrangler` dependency is **required**, not defaulted inside `src/onboarding.js` — unlike `fetchImpl` (which defaults to the real `fetch` throughout this codebase), shelling out to a subprocess is a bigger side effect to leave implicit, and keeping the real implementation entirely in the CLI script keeps `src/onboarding.js` free of `node:fs`/`node:child_process` imports, consistent with every other file under `src/` being pure/testable-by-injection with zero direct OS-level side effects of its own.
+- `validateConfig` lives in `src/onboarding.js` (not the CLI script) specifically so it's covered by the plain-Node test suite — it's the one piece of CLI-adjacent logic that's pure enough to test without touching the filesystem or a subprocess.
+- A validation failure throws before any Google API call or D1 write is attempted (checked first in the CLI entrypoint) — no partially-onboarded client from a config typo.
+
+### Task 45: `getGoogleAccessToken` — optional `scope` parameter
+
+**Files:**
+- Modify: `expense-intake/src/google-auth.js`
+- Modify: `expense-intake/test/google-auth.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/google-auth.test.js`:
+
+```js
+import { getGoogleAccessToken, SHEETS_SCOPE, DRIVE_FILE_SCOPE } from '../src/google-auth.js';
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: google-auth.test.js');`:
+
+```js
+  // an explicit scope param overrides the default SHEETS_SCOPE (used by the onboarding
+  // script, which additionally needs Drive access to share a newly created Sheet)
+  const scopeFetch = fakeFetch(true, 200, { access_token: 'ya29.scoped_token', token_type: 'Bearer', expires_in: 3600 });
+  await getGoogleAccessToken({
+    serviceAccountJson: serviceAccount, fetchImpl: scopeFetch,
+    scope: `${SHEETS_SCOPE} ${DRIVE_FILE_SCOPE}`,
+  });
+  const scopeJwt = new URLSearchParams(scopeFetch.calls[0].init.body).get('assertion');
+  const [, encodedScopeClaimSet] = scopeJwt.split('.');
+  const scopeClaimSet = JSON.parse(base64UrlDecode(encodedScopeClaimSet).toString('utf8'));
+  assert(scopeClaimSet.scope === 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file', 'a provided scope must override the default and support space-joined multiple scopes');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/google-auth.test.js`
+Expected: fails — `SHEETS_SCOPE`/`DRIVE_FILE_SCOPE` are not yet exported from `../src/google-auth.js`, and `getGoogleAccessToken` ignores any `scope` argument.
+
+- [ ] **Step 3: Add the parameter**
+
+In `expense-intake/src/google-auth.js`, replace:
+
+```js
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+```
+
+with:
+
+```js
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+export const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file'; // least-privilege Drive scope — Step 9's onboarding script only ever shares files the service account itself created
+```
+
+Update the function signature and claim set:
+
+```js
+export async function getGoogleAccessToken({ serviceAccountJson, fetchImpl, now, scope }) {
+  const account = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson;
+  const getNow = now || Date.now;
+  const nowSeconds = Math.floor(getNow() / 1000);
+  const claimSet = {
+    iss: account.client_email,
+    scope: scope || SHEETS_SCOPE,
+    aud: TOKEN_URL,
+    iat: nowSeconds,
+    exp: nowSeconds + 3600,
+  };
+```
+
+(the rest of the function is unchanged)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/google-auth.test.js`
+Expected: `PASS: google-auth.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/google-auth.js expense-intake/test/google-auth.test.js
+```
+
+---
+
+### Task 46: `sheets.js` — `createSpreadsheet`, `writeHeaderRow`, `shareSpreadsheetWithEmail`
+
+**Files:**
+- Modify: `expense-intake/src/sheets.js`
+- Modify: `expense-intake/test/sheets.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/sheets.test.js`:
+
+```js
+import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow, createSpreadsheet, writeHeaderRow, shareSpreadsheetWithEmail } from '../src/sheets.js';
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: sheets.test.js');`:
+
+```js
+  // createSpreadsheet
+  const createFetch = fakeFetch(true, 200, { spreadsheetId: 'new_sheet_123' });
+  const spreadsheetId = await createSpreadsheet({ accessToken: 'ya29.token', title: 'Acme Rentals — Main St', fetchImpl: createFetch });
+  assert(spreadsheetId === 'new_sheet_123', 'createSpreadsheet must return the new spreadsheetId');
+  const createCall = createFetch.calls[0];
+  assert(createCall.url === 'https://sheets.googleapis.com/v4/spreadsheets', 'createSpreadsheet must POST to the Sheets API base to create a new spreadsheet');
+  const createBody = JSON.parse(createCall.init.body);
+  assert(createBody.properties.title === 'Acme Rentals — Main St', 'createSpreadsheet must set the spreadsheet title');
+  assert(createBody.sheets[0].properties.title === 'Sheet1', 'createSpreadsheet must name the first tab Sheet1, matching the fixed range every append/delete call already assumes');
+
+  // createSpreadsheet: error path
+  const createFailFetch = fakeFetch(false, 403, { error: { message: 'insufficient permission' } });
+  let threwCreate = false;
+  try {
+    await createSpreadsheet({ accessToken: 'bad', title: 'x', fetchImpl: createFailFetch });
+  } catch (err) {
+    threwCreate = true;
+    assert(err.message === 'insufficient permission', 'createSpreadsheet must surface the Sheets API error message');
+  }
+  assert(threwCreate, 'a non-2xx create response must throw');
+
+  // writeHeaderRow
+  const headerFetch = fakeFetch(true, 200, { updatedRange: 'Sheet1!A1:I1' });
+  await writeHeaderRow({ accessToken: 'ya29.token', spreadsheetId: 'new_sheet_123', fetchImpl: headerFetch });
+  const headerCall = headerFetch.calls[0];
+  assert(headerCall.url.includes('/new_sheet_123/values/') && headerCall.url.includes(encodeURIComponent('Sheet1!A1:I1')), 'writeHeaderRow must PUT to the Sheet1!A1:I1 range for the given spreadsheetId');
+  assert(headerCall.init.method === 'PUT', 'writeHeaderRow must use PUT (values.update), not append');
+  const headerBody = JSON.parse(headerCall.init.body);
+  assert(
+    JSON.stringify(headerBody.values[0]) === JSON.stringify(['Date', 'Vendor', 'Amount', 'Category', 'Confidence', 'Photo', 'Raw Text', 'Logged By', 'Notes']),
+    "writeHeaderRow must write the exact 9 column headers, matching fileExpense's append column order"
+  );
+
+  // shareSpreadsheetWithEmail
+  const shareFetch = fakeFetch(true, 200, { id: 'permission123' });
+  await shareSpreadsheetWithEmail({ accessToken: 'ya29.token', spreadsheetId: 'new_sheet_123', email: 'owner@acme-rentals.com', fetchImpl: shareFetch });
+  const shareCall = shareFetch.calls[0];
+  assert(shareCall.url === 'https://www.googleapis.com/drive/v3/files/new_sheet_123/permissions', 'shareSpreadsheetWithEmail must POST to the Drive API permissions endpoint for the given spreadsheetId');
+  const shareBody = JSON.parse(shareCall.init.body);
+  assert(shareBody.role === 'reader' && shareBody.type === 'user' && shareBody.emailAddress === 'owner@acme-rentals.com', 'shareSpreadsheetWithEmail must share as a reader (Viewer) with the given email');
+
+  // shareSpreadsheetWithEmail: error path
+  const shareFailFetch = fakeFetch(false, 400, { error: { message: 'Invalid sharing request' } });
+  let threwShare = false;
+  try {
+    await shareSpreadsheetWithEmail({ accessToken: 'bad', spreadsheetId: 'new_sheet_123', email: 'bad-email', fetchImpl: shareFailFetch });
+  } catch (err) {
+    threwShare = true;
+    assert(err.message === 'Invalid sharing request', 'shareSpreadsheetWithEmail must surface the Drive API error message');
+  }
+  assert(threwShare, 'a non-2xx share response must throw');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/sheets.test.js`
+Expected: fails — `createSpreadsheet`/`writeHeaderRow`/`shareSpreadsheetWithEmail` are not yet exported from `../src/sheets.js`.
+
+- [ ] **Step 3: Add the functions**
+
+Add a new constant near the top of `expense-intake/src/sheets.js`, alongside `SHEETS_API_BASE`/`APPEND_RANGE`/`DEFAULT_SHEET_ID`:
+
+```js
+const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
+const HEADER_ROW = ['Date', 'Vendor', 'Amount', 'Category', 'Confidence', 'Photo', 'Raw Text', 'Logged By', 'Notes'];
+```
+
+Append to `expense-intake/src/sheets.js`:
+
+```js
+
+export async function createSpreadsheet({ accessToken, title, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const response = await doFetch(SHEETS_API_BASE, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ properties: { title }, sheets: [{ properties: { title: 'Sheet1' } }] }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.error && data.error.message) || `Sheets API request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data.spreadsheetId;
+}
+
+export async function writeHeaderRow({ accessToken, spreadsheetId, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const range = encodeURIComponent('Sheet1!A1:I1');
+  const url = `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${range}?valueInputOption=RAW`;
+  const response = await doFetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ values: [HEADER_ROW] }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.error && data.error.message) || `Sheets API request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function shareSpreadsheetWithEmail({ accessToken, spreadsheetId, email, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(spreadsheetId)}/permissions`;
+  const response = await doFetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ role: 'reader', type: 'user', emailAddress: email }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.error && data.error.message) || `Drive API request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/sheets.test.js`
+Expected: `PASS: sheets.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/sheets.js expense-intake/test/sheets.test.js
+```
+
+---
+
+### Task 47: `src/onboarding.js` — `validateConfig`, `buildOnboardingSql`, `createHouseSheets`
+
+**Files:**
+- Create: `expense-intake/src/onboarding.js`
+- Create: `expense-intake/test/onboarding.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [ ] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/onboarding.test.js
+import crypto from 'node:crypto';
+import { validateConfig, buildOnboardingSql, createHouseSheets } from '../src/onboarding.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function generateTestServiceAccount() {
+  const { privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  return { client_email: 'onboard-sa@test.iam.gserviceaccount.com', private_key: privateKey };
+}
+
+function fakeFetch(handlers) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    for (const [match, respond] of handlers) {
+      if (url.includes(match)) return respond(url, init);
+    }
+    throw new Error(`Unhandled fetch in test: ${url}`);
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+async function main() {
+  // validateConfig: a fully valid config must not throw
+  {
+    const validConfig = {
+      businessName: 'Acme Rentals', email: 'owner@acme-rentals.com', twilioNumber: '+15559876543',
+      accountingSoftware: 'quickbooks_online',
+      houses: [{ address: '123 Main St', nickname: null }],
+      authorizedSenders: [{ phoneNumber: '+15551234567', label: null }],
+    };
+    let threwValid = false;
+    try { validateConfig(validConfig); } catch { threwValid = true; }
+    assert(!threwValid, 'a fully valid config must not throw');
+  }
+
+  // validateConfig: missing/invalid fields are all reported together, in one throw
+  {
+    let threwInvalid = false;
+    try {
+      validateConfig({ accountingSoftware: 'not_a_real_option', houses: [], authorizedSenders: [] });
+    } catch (err) {
+      threwInvalid = true;
+      assert(err.message.includes('businessName'), 'must report a missing businessName');
+      assert(err.message.includes('accountingSoftware'), 'must report an invalid accountingSoftware');
+      assert(err.message.includes('houses'), 'must report an empty houses array');
+      assert(err.message.includes('authorizedSenders'), 'must report an empty authorizedSenders array');
+    }
+    assert(threwInvalid, 'an invalid config must throw before any side effect is attempted');
+  }
+
+  // buildOnboardingSql
+  {
+    const config = {
+      businessName: "Acme's Rentals",
+      carePlanTier: 'standard',
+      twilioNumber: '+15559876543',
+      accountingSoftware: 'quickbooks_online',
+      authorizedSenders: [
+        { phoneNumber: '+15551234567', label: 'Owner' },
+        { phoneNumber: '+15559998888', label: null },
+      ],
+    };
+    const housesWithSheets = [
+      { address: '123 Main St', nickname: 'Main St', googleSheetId: 'sheet_abc' },
+      { address: "456 O'Hare Ave", nickname: null, googleSheetId: 'sheet_def' },
+    ];
+    const sql = buildOnboardingSql(config, housesWithSheets);
+    assert(sql.includes('INSERT INTO clients'), 'must include a clients INSERT');
+    assert(sql.includes("Acme''s Rentals"), 'must escape single quotes in string values by doubling them');
+    assert(sql.includes("'standard'") && sql.includes("'+15559876543'") && sql.includes("'quickbooks_online'"), 'must interpolate the client fields');
+    assert((sql.match(/INSERT INTO houses/g) || []).length === 2, 'must include one houses INSERT per house');
+    assert(sql.includes("(SELECT id FROM clients WHERE twilio_number = '+15559876543')"), 'houses/authorized_senders INSERTs must resolve client_id via a twilio_number subquery, not a captured last_row_id');
+    assert(sql.includes("456 O''Hare Ave"), "must escape single quotes in a house's address too");
+    assert(sql.includes("'sheet_abc'") && sql.includes("'sheet_def'"), "must interpolate each house's created googleSheetId");
+    assert((sql.match(/INSERT INTO authorized_senders/g) || []).length === 2, 'must include one authorized_senders INSERT per sender');
+    assert(sql.includes('NULL'), 'a null nickname/label must be written as SQL NULL, not the string "null"');
+  }
+
+  // createHouseSheets
+  {
+    const config = {
+      businessName: 'Acme Rentals',
+      email: 'owner@acme-rentals.com',
+      houses: [{ address: '123 Main St', nickname: 'Main St' }],
+    };
+    const fetchImpl = fakeFetch([
+      ['oauth2.googleapis.com', async () => ({ ok: true, status: 200, json: async () => ({ access_token: 'ya29.tok' }) })],
+      ['sheets.googleapis.com/v4/spreadsheets', async (url, init) => {
+        if (init.method === 'POST' && !url.includes('/values/')) {
+          return { ok: true, status: 200, json: async () => ({ spreadsheetId: 'new_sheet_1' }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ updatedRange: 'Sheet1!A1:I1' }) };
+      }],
+      ['drive/v3/files', async () => ({ ok: true, status: 200, json: async () => ({ id: 'perm1' }) })],
+    ]);
+    const result = await createHouseSheets(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl });
+    assert(result.length === 1 && result[0].googleSheetId === 'new_sheet_1', 'createHouseSheets must attach the newly created spreadsheetId to each house');
+    const shareCall = fetchImpl.calls.find((c) => c.url.includes('/permissions'));
+    assert(shareCall, 'createHouseSheets must share the new spreadsheet');
+    const shareBody = JSON.parse(shareCall.init.body);
+    assert(shareBody.emailAddress === 'owner@acme-rentals.com', 'createHouseSheets must share with the configured email');
+  }
+
+  console.log('PASS: onboarding.test.js');
+}
+
+await main();
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/onboarding.test.js`
+Expected: fails with a module-not-found error for `../src/onboarding.js` (it doesn't exist yet).
+
+- [ ] **Step 3: Write the module**
+
+```js
+// expense-intake/src/onboarding.js
+import { getGoogleAccessToken, SHEETS_SCOPE, DRIVE_FILE_SCOPE } from './google-auth.js';
+import { createSpreadsheet, writeHeaderRow, shareSpreadsheetWithEmail } from './sheets.js';
+
+const ACCOUNTING_SOFTWARE_VALUES = ['quickbooks_online', 'quickbooks_desktop', 'wave', 'xero', 'csv'];
+
+export function validateConfig(config) {
+  const errors = [];
+  if (!config.businessName) errors.push('businessName is required');
+  if (!config.email) errors.push('email is required');
+  if (!config.twilioNumber) errors.push('twilioNumber is required');
+  if (!ACCOUNTING_SOFTWARE_VALUES.includes(config.accountingSoftware)) {
+    errors.push(`accountingSoftware must be one of: ${ACCOUNTING_SOFTWARE_VALUES.join(', ')}`);
+  }
+  if (!Array.isArray(config.houses) || config.houses.length === 0) {
+    errors.push('houses must be a non-empty array');
+  }
+  if (!Array.isArray(config.authorizedSenders) || config.authorizedSenders.length === 0) {
+    errors.push('authorizedSenders must be a non-empty array');
+  }
+  if (errors.length > 0) {
+    throw new Error(`Invalid onboarding config:\n${errors.map((e) => `  - ${e}`).join('\n')}`);
+  }
+}
+
+function escapeSqlString(value) {
+  return String(value).replace(/'/g, "''");
+}
+
+function sqlValue(value) {
+  return value === null || value === undefined ? 'NULL' : `'${escapeSqlString(value)}'`;
+}
+
+export async function createHouseSheets(config, deps = {}) {
+  const accessToken = await getGoogleAccessToken({
+    serviceAccountJson: deps.serviceAccountJson,
+    fetchImpl: deps.fetchImpl,
+    scope: `${SHEETS_SCOPE} ${DRIVE_FILE_SCOPE}`,
+  });
+
+  const housesWithSheets = [];
+  for (const house of config.houses) {
+    const title = `${config.businessName} — ${house.nickname || house.address}`;
+    const spreadsheetId = await createSpreadsheet({ accessToken, title, fetchImpl: deps.fetchImpl });
+    await writeHeaderRow({ accessToken, spreadsheetId, fetchImpl: deps.fetchImpl });
+    await shareSpreadsheetWithEmail({ accessToken, spreadsheetId, email: config.email, fetchImpl: deps.fetchImpl });
+    housesWithSheets.push({ ...house, googleSheetId: spreadsheetId });
+  }
+  return housesWithSheets;
+}
+
+export function buildOnboardingSql(config, housesWithSheets) {
+  const statements = [];
+
+  statements.push(
+    `INSERT INTO clients (business_name, care_plan_tier, twilio_number, accounting_software, status) VALUES (${sqlValue(config.businessName)}, ${sqlValue(config.carePlanTier ?? null)}, ${sqlValue(config.twilioNumber)}, ${sqlValue(config.accountingSoftware)}, 'active');`
+  );
+
+  // twilio_number is UNIQUE and known upfront, so subsequent INSERTs resolve client_id via
+  // this subquery rather than depending on a captured last_row_id — wrangler d1 execute
+  // --file doesn't hand one back per-statement in a way this script could otherwise use.
+  const clientIdSubquery = `(SELECT id FROM clients WHERE twilio_number = ${sqlValue(config.twilioNumber)})`;
+
+  for (const house of housesWithSheets) {
+    statements.push(
+      `INSERT INTO houses (client_id, address, nickname, google_sheet_id) VALUES (${clientIdSubquery}, ${sqlValue(house.address)}, ${sqlValue(house.nickname ?? null)}, ${sqlValue(house.googleSheetId)});`
+    );
+  }
+
+  for (const sender of config.authorizedSenders) {
+    statements.push(
+      `INSERT INTO authorized_senders (client_id, phone_number, label) VALUES (${clientIdSubquery}, ${sqlValue(sender.phoneNumber)}, ${sqlValue(sender.label ?? null)});`
+    );
+  }
+
+  return statements.join('\n');
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/onboarding.test.js`
+Expected: `PASS: onboarding.test.js`
+
+- [ ] **Step 5: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './migration-0002.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './vcard.test.js';
+import './onboarding.test.js';
+import './expense-flow.test.js';
+import './message-dedup.test.js';
+import './conversation-state.test.js';
+import './scheduled.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [ ] **Step 6: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 7: Stage the change**
+
+```bash
+git add expense-intake/src/onboarding.js expense-intake/test/onboarding.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 48: `onboardClient` — tying `createHouseSheets` + `buildOnboardingSql` + `runWrangler` together
+
+**Files:**
+- Modify: `expense-intake/src/onboarding.js`
+- Modify: `expense-intake/test/onboarding.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Add `onboardClient` to the existing import from `'../src/onboarding.js'` in `expense-intake/test/onboarding.test.js`. Insert this block into `main()`, immediately before `console.log('PASS: onboarding.test.js');`:
+
+```js
+  // onboardClient ties createHouseSheets + buildOnboardingSql + runWrangler together
+  {
+    const config = {
+      businessName: 'Acme Rentals',
+      email: 'owner@acme-rentals.com',
+      carePlanTier: null,
+      twilioNumber: '+15559876543',
+      accountingSoftware: 'quickbooks_online',
+      houses: [{ address: '123 Main St', nickname: 'Main St' }],
+      authorizedSenders: [{ phoneNumber: '+15551234567', label: 'Owner' }],
+    };
+    const fetchImpl = fakeFetch([
+      ['oauth2.googleapis.com', async () => ({ ok: true, status: 200, json: async () => ({ access_token: 'ya29.tok' }) })],
+      ['sheets.googleapis.com/v4/spreadsheets', async (url, init) => {
+        if (init.method === 'POST' && !url.includes('/values/')) {
+          return { ok: true, status: 200, json: async () => ({ spreadsheetId: 'new_sheet_1' }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ updatedRange: 'Sheet1!A1:I1' }) };
+      }],
+      ['drive/v3/files', async () => ({ ok: true, status: 200, json: async () => ({ id: 'perm1' }) })],
+    ]);
+    let ranSql = null;
+    const runWrangler = async (sql) => { ranSql = sql; };
+    const result = await onboardClient(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl, runWrangler });
+    assert(result.housesWithSheets[0].googleSheetId === 'new_sheet_1', 'onboardClient must return the houses with their created googleSheetId');
+    assert(ranSql && ranSql.includes('new_sheet_1'), 'onboardClient must pass SQL referencing the newly created sheet id to runWrangler');
+    assert(ranSql.includes('INSERT INTO clients') && ranSql.includes('INSERT INTO authorized_senders'), 'onboardClient must run the full onboarding SQL, not just the houses portion');
+  }
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/onboarding.test.js`
+Expected: fails — `onboardClient` is not yet exported from `../src/onboarding.js`.
+
+- [ ] **Step 3: Add the function**
+
+Append to `expense-intake/src/onboarding.js`:
+
+```js
+
+export async function onboardClient(config, deps = {}) {
+  const housesWithSheets = await createHouseSheets(config, deps);
+  const sql = buildOnboardingSql(config, housesWithSheets);
+  await deps.runWrangler(sql);
+  return { housesWithSheets, sql };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/onboarding.test.js`
+Expected: `PASS: onboarding.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/onboarding.js expense-intake/test/onboarding.test.js
+```
+
+---
+
+### Task 49: `scripts/onboard-client.js` — the CLI entrypoint
+
+**Files:**
+- Create: `expense-intake/scripts/onboard-client.js`
+
+This is the thin, side-effecting entrypoint — no dedicated automated test (it does real file I/O, a real subprocess call, and `process.exit`, none of which belong under the plain-Node `test/run-all.js` suite). Its only non-trivial logic, `validateConfig`, is already covered by Task 47's `onboarding.test.js`. Verification for this task is a manual dry run against `--local`.
+
+- [ ] **Step 1: Write the script**
+
+```js
+#!/usr/bin/env node
+// expense-intake/scripts/onboard-client.js
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { validateConfig, onboardClient } from '../src/onboarding.js';
+
+const D1_DATABASE_NAME = 'expense-intake-db';
+const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+function runWranglerWithSql(sql, { local }) {
+  const tmpFile = path.join(os.tmpdir(), `onboard-client-${Date.now()}.sql`);
+  fs.writeFileSync(tmpFile, sql, 'utf8');
+  try {
+    const args = ['wrangler', 'd1', 'execute', D1_DATABASE_NAME, local ? '--local' : '--remote', `--file=${tmpFile}`];
+    execFileSync('npx', args, { stdio: 'inherit', cwd: PROJECT_ROOT });
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
+}
+
+async function main() {
+  const [configPath, serviceAccountPath, ...rest] = process.argv.slice(2);
+  const local = rest.includes('--local');
+
+  if (!configPath || !serviceAccountPath) {
+    console.error('Usage: node scripts/onboard-client.js <config.json> <service-account.json> [--local]');
+    process.exit(1);
+  }
+
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  validateConfig(config);
+  const serviceAccountJson = fs.readFileSync(serviceAccountPath, 'utf8');
+
+  const { housesWithSheets } = await onboardClient(config, {
+    serviceAccountJson,
+    runWrangler: (sql) => runWranglerWithSql(sql, { local }),
+  });
+
+  console.log(`\nOnboarded ${config.businessName}:`);
+  for (const house of housesWithSheets) {
+    console.log(`  ${house.nickname || house.address}: https://docs.google.com/spreadsheets/d/${house.googleSheetId}`);
+  }
+  console.log(`\nNext step: point ${config.twilioNumber}'s messaging webhook at the deployed Worker's /sms route.`);
+}
+
+main().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Manual dry run against `--local`**
+
+```bash
+cd expense-intake
+cat > /tmp/test-client.json <<'JSON'
+{
+  "businessName": "Test Rentals",
+  "email": "you@example.com",
+  "accountingSoftware": "quickbooks_online",
+  "twilioNumber": "+15550001111",
+  "houses": [{ "address": "1 Test St", "nickname": "Test House" }],
+  "authorizedSenders": [{ "phoneNumber": "+15550002222", "label": "Owner" }]
+}
+JSON
+node scripts/onboard-client.js /tmp/test-client.json /path/to/real-service-account.json --local
+npx wrangler d1 execute expense-intake-db --local --command="SELECT * FROM clients WHERE twilio_number = '+15550001111'"
+```
+
+Expected: the script prints the new house's Sheet URL (a real, newly created, shared spreadsheet — this dry run still makes real Google API calls, since there's no local emulation for Sheets/Drive, only for D1), and the `wrangler d1 execute --local` query shows the inserted client row. Clean up the test row afterward with `DELETE FROM clients WHERE twilio_number = '+15550001111'` (cascades are not enforced by SQLite by default, so also manually delete the corresponding `houses`/`authorized_senders` rows if this local D1 state will be reused).
+
+- [ ] **Step 3: Stage the change**
+
+```bash
+git add expense-intake/scripts/onboard-client.js
+```
+
+---
+
+### Task 50: Docs — README onboarding instructions and final wrap-up
+
+**Files:**
+- Modify: `expense-intake/README.md`
+
+- [ ] **Step 1: Add an "Onboarding a new client" section**
+
+Insert this new section into `expense-intake/README.md`, immediately before `## Running the Worker's own tests`:
+
+```markdown
+## Onboarding a new client
+
+Once a Twilio number has been purchased for the client (still a manual
+step — see "Twilio secrets" below), everything else is one command:
+
+\`\`\`bash
+node scripts/onboard-client.js path/to/client-config.json path/to/service-account.json
+\`\`\`
+
+The config file lists the client's business name, email (used only to
+share each house's Sheet as Viewer — never stored in D1), accounting
+software, Twilio number, and its houses/authorized senders:
+
+\`\`\`json
+{
+  "businessName": "Acme Rentals",
+  "email": "owner@acme-rentals.com",
+  "accountingSoftware": "quickbooks_online",
+  "twilioNumber": "+15559876543",
+  "carePlanTier": "standard",
+  "houses": [
+    { "address": "123 Main St", "nickname": "Main St" }
+  ],
+  "authorizedSenders": [
+    { "phoneNumber": "+15551234567", "label": "Owner" }
+  ]
+}
+\`\`\`
+
+`accountingSoftware` must be one of `quickbooks_online`,
+`quickbooks_desktop`, `wave`, `xero`, `csv`. The script creates each
+house's Google Sheet (with the correct header row) and shares it with
+`email` as a Viewer, then writes the `clients`/`houses`/
+`authorized_senders` rows to D1 via `wrangler d1 execute`. Pass
+`--local` to target the local D1 emulation for a dry run instead of the
+real remote database — there's no local emulation for Sheets/Drive, so
+even a `--local` dry run creates real Google Sheets. See
+`docs/superpowers/specs/2026-08-18-expense-intake-onboarding-cli-design.md`
+for the full design.
+
+After onboarding, point the client's Twilio number's messaging webhook
+at this Worker's `/sms` route (see "Twilio secrets" below) — that step
+is still manual, since provisioning/configuring a phone number is a
+deliberate, billable action this script intentionally doesn't automate.
+```
+
+- [ ] **Step 2: Update the `## Status` section**
+
+Replace `## Status` in `expense-intake/README.md` with:
+
+```markdown
+## Status
+
+All 9 Build Order steps are complete: repo scaffolding, D1 schema, the
+provider abstraction, the Twilio inbound webhook with R2 photo storage,
+the full happy-path pipeline (parse, categorize, file to Sheets/D1 or
+`pending_review`), Twilio-retry dedup protection, the interactive
+house-selection reply flow, the 10-minute post-confirmation correction
+window, the client-initiated `"pending"` review queue, the daily purge /
+monthly nudge Cron Triggers, save-contact onboarding (a one-time vCard
+MMS to each newly authorized sender), and the onboarding CLI script
+(auto-created/shared Google Sheets + D1 row creation for a new client).
+See the specs under `docs/superpowers/specs/2026-08-18-*` and
+`docs/superpowers/plans/2026-08-17-expense-intake-worker.md` for the
+full history and design rationale of each step.
+```
+
+- [ ] **Step 3: Run the full suite one more time**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 4: Stage the change**
+
+```bash
+git add expense-intake/README.md
+```
+
+---
+
+## Self-Review — Step 9
+
+**Spec coverage for Step 9:** The JSON-config invocation and scope boundary (Twilio provisioning stays manual) → Task 49's CLI entrypoint and its usage/argument handling, matching the design spec's "Invocation" and "Scope boundary" sections exactly. Auto-created and shared Google Sheets → Task 46's three new Sheets/Drive functions + Task 47's `createHouseSheets`, with the header row matching `fileExpense`'s existing append column order exactly (checked explicitly in Task 46's test). The new Drive scope → Task 45's `getGoogleAccessToken` extension, additive and non-breaking to every existing Worker-runtime call site. The `twilio_number`-subquery approach to D1 writes → Task 47's `buildOnboardingSql`, tested explicitly for both the subquery form and correct escaping. The pure-logic/thin-CLI split → Task 47/48 (`src/onboarding.js`, fully unit-tested) vs. Task 49 (`scripts/onboard-client.js`, deliberately outside the automated suite, verified by manual dry run instead).
+
+**Not yet in scope, intentionally:** there is no next Build Order step — this is the last one. Anything beyond what's built across all 9 steps (amount/category corrections, a client-facing dashboard, automated Twilio number provisioning, contractor coordination, payment reminders, an AI chat-edit layer) was explicitly out of scope for "Phase 1" from the very first line of this plan document.
+
+**Placeholder scan:** No TBD/TODO markers. `D1_DATABASE_NAME` in Task 49's script is the real, already-in-use `expense-intake-db` name from `wrangler.toml`, not a placeholder. The config JSON shown in Task 50's README is an illustrative example, clearly labeled as such, not a value the project owner needs to fill in to make anything work — the actual config file for a real client is authored fresh per onboarding run.
+
+**Type consistency:** `createHouseSheets(config, deps)` (Task 47) and `buildOnboardingSql(config, housesWithSheets)` (Task 47) are both called with the same `config` object shape in `onboardClient` (Task 48) as in their own standalone tests. `housesWithSheets` entries (`{ ...house, googleSheetId }`) are consumed with that exact field name in `buildOnboardingSql`, matching what `createHouseSheets` actually attaches. `deps.serviceAccountJson`/`deps.fetchImpl`/`deps.runWrangler` are the only three fields any function in `src/onboarding.js` reads off `deps` — Task 49's CLI script supplies exactly those three and no others when calling `onboardClient`. `getGoogleAccessToken`'s new `scope` parameter (Task 45) is passed as the space-joined `${SHEETS_SCOPE} ${DRIVE_FILE_SCOPE}` string in `createHouseSheets`, using the same two exported constant names Task 45 defines — no hardcoded scope-string duplication between the two files.
