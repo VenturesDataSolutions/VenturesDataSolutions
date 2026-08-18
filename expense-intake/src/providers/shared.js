@@ -60,6 +60,10 @@ export const SMS_COPY_ANCHORS = {
     "You're all caught up — no pending items to review.",
     'Nothing pending right now — all clear.',
   ],
+  contact_card_intro: [
+    "Save this number for [business]'s expense tracker — text a receipt anytime.",
+    "This is [business]'s expense line — save the contact so texts are easy to spot.",
+  ],
 };
 
 export function buildSmsCopyPrompt(type, vars) {

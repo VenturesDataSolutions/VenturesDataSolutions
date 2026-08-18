@@ -5,7 +5,9 @@ import {
   insertExpense, insertPendingReview, findPendingReviewById, deletePendingReview,
   findExpenseById, updateExpenseHouse,
   findOldestPendingReviewForClient, findNextPendingReviewForClient,
+  markContactCardSent,
 } from './db.js';
+import { sendSms } from './twilio.js';
 import { getGoogleAccessToken } from './google-auth.js';
 import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow } from './sheets.js';
 import {
@@ -268,6 +270,32 @@ async function handlePendingQueueReply({ state, client, houses, fields, env, dep
   return smsBody;
 }
 
+// Sends a new authorized sender a tappable vCard the first time they text in — see Step 8's
+// design spec. This must never fail or block the sender's actual reply: any error here is
+// caught and logged, leaving contact_card_sent_at null so it's simply retried on their next
+// message, instead of propagating up and turning a successful expense log into a 500.
+async function maybeSendContactCard({ client, sender, fields, env, deps }) {
+  if (sender.contact_card_sent_at) {
+    return;
+  }
+  try {
+    const body = await safeGenerateSmsCopy('contact_card_intro', { business: client.business_name }, env, deps);
+    const mediaUrl = `${env.WORKER_BASE_URL}/contact-card/${client.id}`;
+    await sendSms({
+      accountSid: env.TWILIO_ACCOUNT_SID,
+      authToken: env.TWILIO_AUTH_TOKEN,
+      from: client.twilio_number,
+      to: fields.from,
+      body,
+      mediaUrl,
+      fetchImpl: deps.fetchImpl,
+    });
+    await markContactCardSent(env.DB, sender.id, new Date().toISOString());
+  } catch (err) {
+    console.error('Failed to send contact card', { senderId: sender.id, error: err.message });
+  }
+}
+
 export async function processExpenseMessage({ fields, photoR2Key, env, deps = {} }) {
   if (!fields.body && !photoR2Key) {
     return { smsBody: '' };
@@ -282,6 +310,8 @@ export async function processExpenseMessage({ fields, photoR2Key, env, deps = {}
   if (!sender) {
     return { smsBody: '' };
   }
+
+  await maybeSendContactCard({ client, sender, fields, env, deps });
 
   const houses = await findHousesForClient(env.DB, client.id);
 

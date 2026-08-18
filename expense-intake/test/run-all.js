@@ -11,6 +11,7 @@ import './db.test.js';
 import './google-auth.test.js';
 import './sheets.test.js';
 import './twiml.test.js';
+import './vcard.test.js';
 import './expense-flow.test.js';
 import './message-dedup.test.js';
 import './conversation-state.test.js';

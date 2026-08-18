@@ -71,6 +71,17 @@ async function main() {
   response = await workerModule.fetch(request, baseEnv());
   assert(response.status === 404, 'a missing receipt key must 404 through the real route');
 
+  // GET /contact-card/:clientId through the real routing layer
+  const contactCardDb = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' } });
+  request = new Request('https://expense-intake.example.com/contact-card/1', { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv({ DB: contactCardDb }));
+  assert(response.status === 200 && response.headers.get('Content-Type') === 'text/vcard', 'a valid client id must serve a vCard through the real GET /contact-card/:clientId route');
+
+  // GET /contact-card/:clientId for an unknown client -> 404
+  request = new Request('https://expense-intake.example.com/contact-card/999', { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv({ DB: createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null }) }));
+  assert(response.status === 404, 'an unknown client id must 404 through the real route');
+
   // scheduled(): the daily purge cron deletes expired pending_review rows through the real handler
   const purgeDb = createFakeD1({ 'DELETE FROM pending_review WHERE expires_at < ?': { success: true, meta: { changes: 2 } } });
   await workerModule.scheduled({ cron: '0 3 * * *' }, baseEnv({ DB: purgeDb }), {});

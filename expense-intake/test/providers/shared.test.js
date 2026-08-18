@@ -40,6 +40,7 @@ async function main() {
   assert(SMS_COPY_ANCHORS.correction_confirmed.length === 2, 'correction_confirmed must have 2 tone anchors');
   assert(SMS_COPY_ANCHORS.pending_item_prompt.length === 2, 'pending_item_prompt must have 2 tone anchors');
   assert(SMS_COPY_ANCHORS.pending_empty.length === 2, 'pending_empty must have 2 tone anchors');
+  assert(SMS_COPY_ANCHORS.contact_card_intro.length === 2, 'contact_card_intro must have 2 tone anchors');
 
   // buildSmsCopyPrompt: injects vars and anchors, rejects unknown types
   const { system, user } = buildSmsCopyPrompt('confirmation', { amount: '42.50', category: 'Materials', house: '123 Main St' });
@@ -155,6 +156,10 @@ async function main() {
   assert(pendingItemPrompt.user.includes('amount: 10.00') && pendingItemPrompt.user.includes('date: 2026-08-12'), 'pending_item_prompt must carry the actual amount/date values');
   const pendingEmptyPrompt = buildSmsCopyPrompt('pending_empty', {});
   assert(pendingEmptyPrompt.system.includes('caught up') || pendingEmptyPrompt.system.includes('clear'), 'pending_empty prompt must include its tone anchors');
+
+  // buildSmsCopyPrompt must work for the new Step 8 type too
+  const contactCardPrompt = buildSmsCopyPrompt('contact_card_intro', { business: 'Acme Rentals' });
+  assert(contactCardPrompt.user.includes('business: Acme Rentals'), 'contact_card_intro prompt must carry the actual business name');
 
   console.log('PASS: providers/shared.test.js');
 }

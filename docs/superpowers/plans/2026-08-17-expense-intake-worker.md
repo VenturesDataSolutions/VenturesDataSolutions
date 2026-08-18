@@ -7750,7 +7750,7 @@ git add expense-intake/src/index.js expense-intake/test/index.test.js expense-in
 - Modify: `expense-intake/src/db.js`
 - Modify: `expense-intake/test/db.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add `findClientById, markContactCardSent` to the existing import from `'../src/db.js'` in `expense-intake/test/db.test.js`. Insert this block into `main()`, immediately before `console.log('PASS: db.test.js');`:
 
@@ -7777,12 +7777,12 @@ Add `findClientById, markContactCardSent` to the existing import from `'../src/d
   );
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/db.test.js`
 Expected: fails — `findClientById`/`markContactCardSent` are not yet exported from `../src/db.js`.
 
-- [ ] **Step 3: Add the query helpers**
+- [x] **Step 3: Add the query helpers**
 
 Append to `expense-intake/src/db.js`:
 
@@ -7797,17 +7797,17 @@ export async function markContactCardSent(db, senderId, sentAtIso) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/db.test.js`
 Expected: `PASS: db.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/db.js expense-intake/test/db.test.js
@@ -7822,7 +7822,7 @@ git add expense-intake/src/db.js expense-intake/test/db.test.js
 - Create: `expense-intake/test/vcard.test.js`
 - Modify: `expense-intake/test/run-all.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/vcard.test.js
@@ -7844,12 +7844,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/vcard.test.js`
 Expected: fails with a module-not-found error for `../src/vcard.js` (it doesn't exist yet).
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 ```js
 // expense-intake/src/vcard.js
@@ -7864,12 +7864,12 @@ export function buildVCard({ businessName, phoneNumber }) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/vcard.test.js`
 Expected: `PASS: vcard.test.js`
 
-- [ ] **Step 5: Wire the new test into the runner**
+- [x] **Step 5: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -7896,12 +7896,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 6: Run the full suite to confirm no regressions**
+- [x] **Step 6: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 7: Stage the change**
+- [x] **Step 7: Stage the change**
 
 ```bash
 git add expense-intake/src/vcard.js expense-intake/test/vcard.test.js expense-intake/test/run-all.js
@@ -7915,7 +7915,7 @@ git add expense-intake/src/vcard.js expense-intake/test/vcard.test.js expense-in
 - Modify: `expense-intake/src/providers/shared.js`
 - Modify: `expense-intake/test/providers/shared.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/providers/shared.test.js`, immediately after the `SMS_COPY_ANCHORS.pending_empty` assertion added in Step 6:
 
@@ -7931,12 +7931,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: provider
   assert(contactCardPrompt.user.includes('business: Acme Rentals'), 'contact_card_intro prompt must carry the actual business name');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: fails — `SMS_COPY_ANCHORS.contact_card_intro` is `undefined`.
 
-- [ ] **Step 3: Add the new anchor**
+- [x] **Step 3: Add the new anchor**
 
 In `expense-intake/src/providers/shared.js`, add one key to `SMS_COPY_ANCHORS`, immediately after `pending_empty`:
 
@@ -7947,17 +7947,17 @@ In `expense-intake/src/providers/shared.js`, add one key to `SMS_COPY_ANCHORS`, 
   ],
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: `PASS: providers/shared.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
@@ -7971,7 +7971,7 @@ git add expense-intake/src/providers/shared.js expense-intake/test/providers/sha
 - Modify: `expense-intake/src/twilio.js`
 - Modify: `expense-intake/test/twilio.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/twilio.test.js`, immediately after the existing `sendSms` error-path assertion, before `console.log('PASS: twilio.test.js');`:
 
@@ -7986,12 +7986,12 @@ Insert this block into `main()` of `expense-intake/test/twilio.test.js`, immedia
   assert(sendBody.get('MediaUrl') === null, 'sendSms must not send a MediaUrl field for a plain SMS with no mediaUrl provided');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/twilio.test.js`
 Expected: fails — the current `sendSms` never adds a `MediaUrl` field, so `mmsBody.get('MediaUrl')` is `null` instead of the expected URL.
 
-- [ ] **Step 3: Add the parameter**
+- [x] **Step 3: Add the parameter**
 
 Replace `sendSms` in `expense-intake/src/twilio.js`:
 
@@ -8026,17 +8026,17 @@ export async function sendSms({ accountSid, authToken, from, to, body, mediaUrl,
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/twilio.test.js`
 Expected: `PASS: twilio.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js
@@ -8050,7 +8050,7 @@ git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js
 - Modify: `expense-intake/src/expense-flow.js`
 - Modify: `expense-intake/test/expense-flow.test.js`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `expense-intake/test/expense-flow.test.js`, make these three targeted changes:
 
@@ -8168,12 +8168,12 @@ to:
   }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `node expense-intake/test/expense-flow.test.js`
 Expected: fails — `processExpenseMessage` has no `maybeSendContactCard` logic yet, so scenario 26/27's `twilioCall` assertions fail (no `api.twilio.com` call ever happens) and scenario 28 fails too until the guard exists — but note it will currently "pass" for the wrong reason (no vCard logic exists at all yet); the meaningful failures are 26 and 27.
 
-- [ ] **Step 3: Wire it in**
+- [x] **Step 3: Wire it in**
 
 Update the import block near the top of `expense-intake/src/expense-flow.js`:
 
@@ -8232,17 +8232,17 @@ In `processExpenseMessage`, add a call right after the sender lookup succeeds:
   const houses = await findHousesForClient(env.DB, client.id);
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `node expense-intake/test/expense-flow.test.js`
 Expected: `PASS: expense-flow.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test.js
@@ -8256,7 +8256,7 @@ git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test
 - Modify: `expense-intake/src/handlers.js`
 - Modify: `expense-intake/test/handlers.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/handlers.test.js`:
 
@@ -8291,12 +8291,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: handlers
   }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/handlers.test.js`
 Expected: fails — `handleGetContactCard` is not yet exported from `../src/handlers.js`.
 
-- [ ] **Step 3: Add the handler**
+- [x] **Step 3: Add the handler**
 
 Update the import block at the top of `expense-intake/src/handlers.js`:
 
@@ -8333,17 +8333,17 @@ export async function handleGetContactCard({ clientId, db }) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/handlers.test.js`
 Expected: `PASS: handlers.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/handlers.js expense-intake/test/handlers.test.js
@@ -8360,7 +8360,7 @@ git add expense-intake/src/handlers.js expense-intake/test/handlers.test.js
 
 No `wrangler.toml` change is needed this step — `DB`, `WORKER_BASE_URL`, and the `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` secrets all already exist from earlier steps.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/index.test.js`, immediately after the existing `GET /receipts/:key for a missing key -> 404` scenario, before the `scheduled()` scenarios added in Step 7:
 
@@ -8377,12 +8377,12 @@ Insert this block into `main()` of `expense-intake/test/index.test.js`, immediat
   assert(response.status === 404, 'an unknown client id must 404 through the real route');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/index.test.js`
 Expected: fails — `GET /contact-card/1` falls through to the catch-all 404 JSON response instead of serving a vCard, since `src/index.js` has no route for it yet.
 
-- [ ] **Step 3: Wire the route**
+- [x] **Step 3: Wire the route**
 
 Update the import and add a new route branch in `expense-intake/src/index.js`:
 
@@ -8403,12 +8403,12 @@ Insert this branch immediately after the existing `GET /receipts/` branch, befor
     }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `node expense-intake/test/index.test.js`
 Expected: `PASS: index.test.js`
 
-- [ ] **Step 5: Update the README**
+- [x] **Step 5: Update the README**
 
 In `expense-intake/README.md`, add a new `## Routes` bullet, immediately after the `GET /receipts/:key` bullet:
 
@@ -8439,12 +8439,12 @@ senders still need manual SQL to create, and `houses.google_sheet_id`
 must still be set by hand.
 ```
 
-- [ ] **Step 6: Run the full suite one more time**
+- [x] **Step 6: Run the full suite one more time**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 7: Stage the change**
+- [x] **Step 7: Stage the change**
 
 ```bash
 git add expense-intake/src/index.js expense-intake/test/index.test.js expense-intake/README.md

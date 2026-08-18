@@ -69,3 +69,11 @@ export async function findAuthorizedSendersForClient(db, clientId) {
   const result = await db.prepare('SELECT * FROM authorized_senders WHERE client_id = ?').bind(clientId).all();
   return result.results;
 }
+
+export async function findClientById(db, id) {
+  return db.prepare('SELECT * FROM clients WHERE id = ?').bind(id).first();
+}
+
+export async function markContactCardSent(db, senderId, sentAtIso) {
+  return db.prepare('UPDATE authorized_senders SET contact_card_sent_at = ? WHERE id = ?').bind(sentAtIso, senderId).run();
+}

@@ -50,6 +50,8 @@ function baseEnv(db, bucket, overrides = {}) {
     OPENROUTER_API_KEY: 'or_key',
     GOOGLE_SERVICE_ACCOUNT_JSON: generateTestServiceAccount(),
     WORKER_BASE_URL: 'https://expense-intake.example.workers.dev',
+    TWILIO_ACCOUNT_SID: 'AC_test',
+    TWILIO_AUTH_TOKEN: 'test_auth_token',
     ...overrides,
   };
 }
@@ -81,7 +83,10 @@ function openRouterRouter({ parse, match, copy }) {
 
 async function main() {
   const client = { id: 1, twilio_number: '+15559876543' };
-  const sender = { id: 5, client_id: 1, phone_number: '+15551234567' };
+  // contact_card_sent_at is set (already onboarded) so scenarios 1-25 below, all written
+  // before Step 8 existed, don't unexpectedly trigger a vCard send — that new behavior gets
+  // its own dedicated scenarios (26-28) with a fresh, not-yet-onboarded sender.
+  const sender = { id: 5, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: '2026-01-01T00:00:00.000Z' };
   const singleHouse = [{ id: 10, client_id: 1, address: '123 Main St', nickname: 'Main St', google_sheet_id: 'sheet_abc' }];
 
   // 1. Happy path: single house, high confidence, photo message
@@ -802,6 +807,99 @@ async function main() {
     assert(queueState && queueState.pendingReviewId === 60, '"pending" must set the queue cursor regardless of the pre-existing awaiting_house state');
     const awaitingState = await kv.get('awaiting_house:+15551234567', { type: 'json' });
     assert(awaitingState && awaitingState.pendingReviewId === 77, 'the awaiting_house state must be left untouched, not explicitly cleared, by starting a pending walkthrough');
+  }
+
+  // 26. A new sender (contact_card_sent_at null) triggers a vCard MMS send on their first
+  // message, marks contact_card_sent_at, and the main reply still proceeds normally.
+  {
+    const newSender = { id: 9, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: null };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': newSender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['api.twilio.com', jsonOk({ sid: 'SM_vcard' })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, "a new sender's first message must still process normally and produce a reply");
+    const twilioCall = fetchImpl.calls.find((c) => c.url.includes('api.twilio.com'));
+    assert(twilioCall, 'a new sender must trigger an outbound vCard MMS send');
+    const twilioBody = new URLSearchParams(twilioCall.init.body);
+    assert(twilioBody.get('MediaUrl') === 'https://expense-intake.example.workers.dev/contact-card/1', "the vCard MMS must point MediaUrl at this client's /contact-card route");
+    assert(twilioBody.get('To') === '+15551234567', 'the vCard MMS must go to the sender who just texted in');
+    const markSentCall = db.calls.find((c) => c.sql.includes('UPDATE authorized_senders SET contact_card_sent_at'));
+    assert(markSentCall && markSentCall.params[1] === 9, 'contact_card_sent_at must be marked for this sender once the vCard send succeeds');
+  }
+
+  // 27. A vCard MMS send failure must not affect the main reply, and contact_card_sent_at
+  // must NOT be marked, so it's retried on the sender's next message.
+  {
+    const newSender = { id: 9, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: null };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': newSender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['api.twilio.com', async () => ({ ok: false, status: 400, json: async () => ({ code: 21211, message: 'Invalid To Phone Number' }) })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'a failed vCard send must not prevent the main reply from being produced');
+    const markSentCall = db.calls.find((c) => c.sql.includes('UPDATE authorized_senders SET contact_card_sent_at'));
+    assert(!markSentCall, 'contact_card_sent_at must not be marked when the vCard send fails, so it is retried next time');
+  }
+
+  // 28. A sender who already has contact_card_sent_at set must not trigger another vCard send.
+  {
+    const onboardedSender = { id: 5, client_id: 1, phone_number: '+15551234567', contact_card_sent_at: '2026-01-01T00:00:00.000Z' };
+    const db = createFakeD1({
+      'SELECT * FROM clients WHERE twilio_number = ?': client,
+      'SELECT * FROM authorized_senders WHERE client_id = ? AND phone_number = ?': onboardedSender,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+    ]);
+    const result = await processExpenseMessage({
+      fields: { from: '+15551234567', to: '+15559876543', body: 'HD $42.50', media: [] },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'an already-onboarded sender must still process normally');
+    const twilioCall = fetchImpl.calls.find((c) => c.url.includes('api.twilio.com'));
+    assert(!twilioCall, 'an already-onboarded sender must not trigger another vCard send attempt');
   }
 
   console.log('PASS: expense-flow.test.js');

@@ -13,6 +13,8 @@ import {
   deleteExpiredPendingReviews,
   findActiveClientsWithPendingCounts,
   findAuthorizedSendersForClient,
+  findClientById,
+  markContactCardSent,
 } from '../src/db.js';
 import { createFakeD1 } from './fake-d1.js';
 
@@ -175,6 +177,27 @@ async function main() {
   const foundSenders = await findAuthorizedSendersForClient(db19, 1);
   assert(foundSenders === senders, 'findAuthorizedSendersForClient must return the results array from the fake DB');
   assert(db19.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
+
+  // findClientById
+  const clientById = { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' };
+  const db20 = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': clientById });
+  const foundClientById = await findClientById(db20, 1);
+  assert(foundClientById === clientById, 'findClientById must return the row from the fake DB');
+  assert(db20.calls[0].params[0] === 1, 'must bind the client id as the query parameter');
+
+  // findClientById: not found
+  const db21 = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null });
+  const missingClientById = await findClientById(db21, 999);
+  assert(missingClientById === null, 'findClientById must return null when no client matches');
+
+  // markContactCardSent
+  const db22 = createFakeD1();
+  await markContactCardSent(db22, 5, '2026-08-18T12:00:00.000Z');
+  assert(db22.calls[0].sql.includes('UPDATE authorized_senders SET contact_card_sent_at'), 'markContactCardSent must UPDATE authorized_senders.contact_card_sent_at');
+  assert(
+    JSON.stringify(db22.calls[0].params) === JSON.stringify(['2026-08-18T12:00:00.000Z', 5]),
+    'markContactCardSent must bind the timestamp then the sender id, matching the SET ... WHERE id = ? clause order'
+  );
 
   console.log('PASS: db.test.js');
 }

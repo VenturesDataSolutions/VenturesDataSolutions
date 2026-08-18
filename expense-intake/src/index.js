@@ -1,4 +1,4 @@
-import { handleSmsWebhook, handleGetReceipt } from './handlers.js';
+import { handleSmsWebhook, handleGetReceipt, handleGetContactCard } from './handlers.js';
 import { purgeExpiredPendingReviews, sendMonthlyNudges } from './scheduled.js';
 
 const DAILY_PURGE_CRON = '0 3 * * *';
@@ -26,6 +26,15 @@ export default {
         return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain' } });
       }
       const result = await handleGetReceipt({ key, bucket: env.RECEIPTS_BUCKET });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    if (request.method === 'GET' && url.pathname.startsWith('/contact-card/')) {
+      const clientId = url.pathname.slice('/contact-card/'.length);
+      const result = await handleGetContactCard({ clientId, db: env.DB });
       return new Response(result.body, {
         status: result.status,
         headers: { 'Content-Type': result.contentType },

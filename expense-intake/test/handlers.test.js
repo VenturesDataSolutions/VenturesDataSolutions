@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { handleSmsWebhook, handleGetReceipt } from '../src/handlers.js';
+import { handleSmsWebhook, handleGetReceipt, handleGetContactCard } from '../src/handlers.js';
 import { createFakeImagesBinding } from './fake-images.js';
 import { createFakeR2Bucket } from './fake-r2.js';
 import { createFakeD1 } from './fake-d1.js';
@@ -176,6 +176,29 @@ async function main() {
     const bucket = createFakeR2Bucket();
     const missing = await handleGetReceipt({ key: 'receipts/nope.jpg', bucket });
     assert(missing.status === 404, 'a missing key must 404');
+  }
+
+  // handleGetContactCard: found
+  {
+    const clientRow = { id: 1, business_name: 'Acme Rentals', twilio_number: '+15559876543' };
+    const db = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': clientRow });
+    const found = await handleGetContactCard({ clientId: '1', db });
+    assert(found.status === 200 && found.contentType === 'text/vcard', 'a valid client id must serve a vCard with the correct content type');
+    assert(found.body.includes('FN:Acme Rentals Expense Tracker'), "the served vCard must carry the client's business name");
+  }
+
+  // handleGetContactCard: client not found
+  {
+    const db = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null });
+    const missing = await handleGetContactCard({ clientId: '999', db });
+    assert(missing.status === 404, 'an unknown client id must 404');
+  }
+
+  // handleGetContactCard: non-numeric clientId must 404, not attempt a broken query
+  {
+    const db = createFakeD1();
+    const bad = await handleGetContactCard({ clientId: 'not-a-number', db });
+    assert(bad.status === 404, 'a non-numeric clientId must 404 rather than attempting a query');
   }
 
   console.log('PASS: handlers.test.js');

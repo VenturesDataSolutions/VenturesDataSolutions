@@ -4,6 +4,8 @@ import { generateReceiptKey, storeReceiptPhoto } from './receipt-storage.js';
 import { processExpenseMessage } from './expense-flow.js';
 import { buildTwiml } from './twiml.js';
 import { getCachedReply, cacheReply } from './message-dedup.js';
+import { findClientById } from './db.js';
+import { buildVCard } from './vcard.js';
 
 export async function handleSmsWebhook({ url, bodyText, signature, env, deps = {} }) {
   const params = parseFormBody(bodyText);
@@ -72,4 +74,21 @@ export async function handleGetReceipt({ key, bucket }) {
   const bytes = await object.arrayBuffer();
   const contentType = (object.httpMetadata && object.httpMetadata.contentType) || 'image/jpeg';
   return { status: 200, contentType, body: bytes };
+}
+
+// This route is deliberately public and unauthenticated, same as handleGetReceipt — but for
+// a different reason: a vCard isn't sensitive data (just a business name and the client's
+// own already-public-facing Twilio number), so there's no unguessable-key requirement here,
+// unlike a receipt photo. See Step 8's design spec.
+export async function handleGetContactCard({ clientId, db }) {
+  const id = Number.parseInt(clientId, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    return { status: 404, contentType: 'text/plain', body: 'Not found' };
+  }
+  const client = await findClientById(db, id);
+  if (!client) {
+    return { status: 404, contentType: 'text/plain', body: 'Not found' };
+  }
+  const vcard = buildVCard({ businessName: client.business_name, phoneNumber: client.twilio_number });
+  return { status: 200, contentType: 'text/vcard', body: vcard };
 }

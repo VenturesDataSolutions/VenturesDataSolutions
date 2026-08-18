@@ -103,6 +103,15 @@ async function main() {
   }
   assert(threwSend, 'a non-2xx Twilio response must throw');
 
+  // sendSms: optional mediaUrl turns the send into an MMS
+  const mmsFetch = fakeFetch(true, 201, { sid: 'SM456', status: 'queued' });
+  await sendSms({ accountSid: 'AC_test', authToken: 'test_auth_token', from: '+15559876543', to: '+15551234567', body: 'Save this contact', mediaUrl: 'https://expense-intake.example.com/contact-card/1', fetchImpl: mmsFetch });
+  const mmsBody = new URLSearchParams(mmsFetch.calls[0].init.body);
+  assert(mmsBody.get('MediaUrl') === 'https://expense-intake.example.com/contact-card/1', 'sendSms must include MediaUrl in the form body when provided');
+
+  // sendSms: mediaUrl omitted must not add a MediaUrl field at all (the earlier plain-SMS call above)
+  assert(sendBody.get('MediaUrl') === null, 'sendSms must not send a MediaUrl field for a plain SMS with no mediaUrl provided');
+
   console.log('PASS: twilio.test.js');
 }
 

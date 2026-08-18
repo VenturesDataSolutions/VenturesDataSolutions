@@ -66,18 +66,24 @@ export function extractWebhookFields(params) {
 
 // Twilio's outbound REST API — the first outbound-send capability this Worker has needed;
 // every reply built in earlier Build Order steps has been a synchronous TwiML response to
-// an inbound webhook, which a Cron Trigger has no inbound request to piggyback on.
-export async function sendSms({ accountSid, authToken, from, to, body, fetchImpl }) {
+// an inbound webhook, which a Cron Trigger has no inbound request to piggyback on. An
+// optional mediaUrl turns the send into an MMS (Step 8's vCard delivery) — Twilio's Messages
+// API treats SMS/MMS through the same endpoint, MediaUrl is just an optional form field.
+export async function sendSms({ accountSid, authToken, from, to, body, mediaUrl, fetchImpl }) {
   const doFetch = fetchImpl || fetch;
   const basicAuth = btoa(`${accountSid}:${authToken}`);
   const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+  const params = { To: to, From: from, Body: body };
+  if (mediaUrl) {
+    params.MediaUrl = mediaUrl;
+  }
   const response = await doFetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${basicAuth}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: new URLSearchParams({ To: to, From: from, Body: body }).toString(),
+    body: new URLSearchParams(params).toString(),
   });
   const data = await response.json();
   if (!response.ok) {

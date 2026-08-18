@@ -37,6 +37,11 @@ implementation plan and Build Order.
   "all caught up" message) in the same reply.
 - `GET /receipts/:key` — serves a stored receipt photo directly from R2, no
   authentication. Used by the "Photo" column link in each house's Sheet.
+- `GET /contact-card/:clientId` — serves a generated vCard for the given
+  client, no authentication (not sensitive data — just a business name
+  and the client's own already-public Twilio number). Used as the
+  `MediaUrl` for the one-time save-contact MMS a new authorized sender
+  gets on their first message.
 - **Cron Triggers** (not an HTTP route): a daily job purges expired
   `pending_review` rows (silent, no client-facing message), and a monthly
   job texts every authorized sender of every active client with
@@ -46,17 +51,18 @@ implementation plan and Build Order.
 
 ## Status
 
-Build Order steps 1-7: repo scaffolding, D1 schema, the provider
+Build Order steps 1-8: repo scaffolding, D1 schema, the provider
 abstraction, the Twilio inbound webhook with R2 photo storage, the full
 happy-path pipeline (parse, categorize, file to Sheets/D1 or
 `pending_review`), Twilio-retry dedup protection, the interactive
 house-selection reply flow, the 10-minute post-confirmation correction
-window, the client-initiated `"pending"` review queue, and the daily
-purge / monthly nudge Cron Triggers. See the three specs under
+window, the client-initiated `"pending"` review queue, the daily purge /
+monthly nudge Cron Triggers, and save-contact onboarding (a one-time
+vCard MMS to each newly authorized sender). See the specs under
 `docs/superpowers/specs/2026-08-18-*` for those steps' designs. Not yet
-built: save-contact onboarding (step 8) and the onboarding CLI script
-(step 9) — houses currently need a `google_sheet_id` set via manual SQL
-before the pipeline can file to their Sheet.
+built: the onboarding CLI script (step 9) — houses/clients/authorized
+senders still need manual SQL to create, and `houses.google_sheet_id`
+must still be set by hand.
 
 ## Running the Worker's own tests
 
