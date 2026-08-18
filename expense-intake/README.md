@@ -37,23 +37,26 @@ implementation plan and Build Order.
   "all caught up" message) in the same reply.
 - `GET /receipts/:key` — serves a stored receipt photo directly from R2, no
   authentication. Used by the "Photo" column link in each house's Sheet.
+- **Cron Triggers** (not an HTTP route): a daily job purges expired
+  `pending_review` rows (silent, no client-facing message), and a monthly
+  job texts every authorized sender of every active client with
+  outstanding pending items, using the same `TWILIO_ACCOUNT_SID`/
+  `TWILIO_AUTH_TOKEN` secrets as the inbound webhook. See
+  `docs/superpowers/specs/2026-08-18-expense-intake-cron-triggers-design.md`.
 
 ## Status
 
-Build Order steps 1-6: repo scaffolding, D1 schema, the provider
+Build Order steps 1-7: repo scaffolding, D1 schema, the provider
 abstraction, the Twilio inbound webhook with R2 photo storage, the full
 happy-path pipeline (parse, categorize, file to Sheets/D1 or
 `pending_review`), Twilio-retry dedup protection, the interactive
 house-selection reply flow, the 10-minute post-confirmation correction
-window, and the client-initiated `"pending"` review queue. See
-`docs/superpowers/specs/2026-08-18-expense-intake-house-selection-correction-design.md`
-and
-`docs/superpowers/specs/2026-08-18-expense-intake-pending-queue-design.md`
-for those two steps' designs. Not yet built: Cron Triggers for the daily
-purge and monthly nudge (step 7), save-contact onboarding (step 8), and
-the onboarding CLI script (step 9) — houses currently need a
-`google_sheet_id` set via manual SQL before the pipeline can file to
-their Sheet.
+window, the client-initiated `"pending"` review queue, and the daily
+purge / monthly nudge Cron Triggers. See the three specs under
+`docs/superpowers/specs/2026-08-18-*` for those steps' designs. Not yet
+built: save-contact onboarding (step 8) and the onboarding CLI script
+(step 9) — houses currently need a `google_sheet_id` set via manual SQL
+before the pipeline can file to their Sheet.
 
 ## Running the Worker's own tests
 
@@ -136,6 +139,21 @@ under "Always Use HTTPS") will break signature verification, since Twilio
 signs the URL it originally POSTed to, not any redirected version. This is
 a common way signature checks silently fail in production: every inbound
 message 403s with no obvious cause from the Worker side alone.
+
+## Testing Cron Triggers locally
+
+`wrangler dev` exposes a special endpoint for firing a configured Cron
+Trigger without waiting for its real schedule:
+
+```bash
+curl "http://localhost:8787/__scheduled?cron=0+3+*+*+*"   # daily purge
+curl "http://localhost:8787/__scheduled?cron=0+9+1+*+*"   # monthly nudge
+```
+
+The plain-Node test suite (`test/scheduled.test.js`, `test/index.test.js`)
+covers the actual purge/nudge logic and the `event.cron` dispatch without
+needing `wrangler dev` at all — this is only useful for an end-to-end
+manual check against real Twilio/D1.
 
 ## KV namespace setup (one-time, per environment)
 

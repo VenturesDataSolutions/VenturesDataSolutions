@@ -7076,7 +7076,7 @@ git add expense-intake/README.md
 - Modify: `expense-intake/src/twilio.js`
 - Modify: `expense-intake/test/twilio.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/twilio.test.js`:
 
@@ -7123,12 +7123,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: twilio.t
   assert(threwSend, 'a non-2xx Twilio response must throw');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/twilio.test.js`
 Expected: fails — `sendSms` is not yet exported from `../src/twilio.js`.
 
-- [ ] **Step 3: Add the function**
+- [x] **Step 3: Add the function**
 
 Append to `expense-intake/src/twilio.js`:
 
@@ -7158,17 +7158,17 @@ export async function sendSms({ accountSid, authToken, from, to, body, fetchImpl
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/twilio.test.js`
 Expected: `PASS: twilio.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js
@@ -7182,7 +7182,7 @@ git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js
 - Modify: `expense-intake/src/db.js`
 - Modify: `expense-intake/test/db.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add `deleteExpiredPendingReviews, findActiveClientsWithPendingCounts, findAuthorizedSendersForClient` to the existing import from `'../src/db.js'` in `expense-intake/test/db.test.js`. Insert this block into `main()`, immediately before `console.log('PASS: db.test.js');`:
 
@@ -7207,12 +7207,12 @@ Add `deleteExpiredPendingReviews, findActiveClientsWithPendingCounts, findAuthor
   assert(db19.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/db.test.js`
 Expected: fails — `deleteExpiredPendingReviews`/`findActiveClientsWithPendingCounts`/`findAuthorizedSendersForClient` are not yet exported from `../src/db.js`.
 
-- [ ] **Step 3: Add the query helpers**
+- [x] **Step 3: Add the query helpers**
 
 Append to `expense-intake/src/db.js`:
 
@@ -7236,17 +7236,17 @@ export async function findAuthorizedSendersForClient(db, clientId) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/db.test.js`
 Expected: `PASS: db.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/db.js expense-intake/test/db.test.js
@@ -7261,7 +7261,7 @@ git add expense-intake/src/db.js expense-intake/test/db.test.js
 
 No new test file for this task — the `monthly_nudge` fallback is exercised by Task 36's `scheduled.test.js`, which imports and calls the now-exported `safeGenerateSmsCopy` indirectly through `sendMonthlyNudges`. This is a mechanical, non-behavior-changing edit to already-tested code (exporting a function and adding one more entry to an existing lookup table), not new business logic in its own right.
 
-- [ ] **Step 1: Export the function**
+- [x] **Step 1: Export the function**
 
 In `expense-intake/src/expense-flow.js`, change:
 
@@ -7275,7 +7275,7 @@ to:
 export async function safeGenerateSmsCopy(type, vars, env, deps) {
 ```
 
-- [ ] **Step 2: Add the fallback entry**
+- [x] **Step 2: Add the fallback entry**
 
 In `expense-intake/src/expense-flow.js`, add to `FALLBACK_SMS_COPY`, immediately after `pending_empty`:
 
@@ -7283,12 +7283,12 @@ In `expense-intake/src/expense-flow.js`, add to `FALLBACK_SMS_COPY`, immediately
   monthly_nudge: (vars) => `${vars.X} items waiting on your OK. Text 'pending' to review.`,
 ```
 
-- [ ] **Step 3: Run the full suite to confirm no regressions**
+- [x] **Step 3: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 4: Stage the change**
+- [x] **Step 4: Stage the change**
 
 ```bash
 git add expense-intake/src/expense-flow.js
@@ -7303,7 +7303,7 @@ git add expense-intake/src/expense-flow.js
 - Create: `expense-intake/test/scheduled.test.js`
 - Modify: `expense-intake/test/run-all.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/scheduled.test.js
@@ -7432,12 +7432,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/scheduled.test.js`
 Expected: fails with a module-not-found error for `../src/scheduled.js` (it doesn't exist yet).
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 ```js
 // expense-intake/src/scheduled.js
@@ -7481,12 +7481,12 @@ export async function sendMonthlyNudges(env, deps = {}) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/scheduled.test.js`
 Expected: `PASS: scheduled.test.js`
 
-- [ ] **Step 5: Wire the new test into the runner**
+- [x] **Step 5: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -7512,12 +7512,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 6: Run the full suite to confirm no regressions**
+- [x] **Step 6: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 7: Stage the change**
+- [x] **Step 7: Stage the change**
 
 ```bash
 git add expense-intake/src/scheduled.js expense-intake/test/scheduled.test.js expense-intake/test/run-all.js
@@ -7533,7 +7533,7 @@ git add expense-intake/src/scheduled.js expense-intake/test/scheduled.test.js ex
 - Modify: `expense-intake/wrangler.toml`
 - Modify: `expense-intake/README.md`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/index.test.js`, immediately before `console.log('PASS: index.test.js');`:
 
@@ -7563,12 +7563,12 @@ Insert this block into `main()` of `expense-intake/test/index.test.js`, immediat
   assert(!threwUnrecognized, 'an unrecognized cron string must be logged, not thrown, so a Worker misconfiguration cannot crash a scheduled invocation');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/index.test.js`
 Expected: fails — `workerModule.scheduled` is not yet defined (the current `export default` only has `fetch`).
 
-- [ ] **Step 3: Rewrite `src/index.js`**
+- [x] **Step 3: Rewrite `src/index.js`**
 
 Replace `expense-intake/src/index.js` in full:
 
@@ -7628,12 +7628,12 @@ export default {
 };
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `node expense-intake/test/index.test.js`
 Expected: `PASS: index.test.js`
 
-- [ ] **Step 5: Add the `[triggers]` crons to `wrangler.toml`**
+- [x] **Step 5: Add the `[triggers]` crons to `wrangler.toml`**
 
 Replace the trailing comment block in `expense-intake/wrangler.toml`:
 
@@ -7659,7 +7659,7 @@ crons = [
 ]
 ```
 
-- [ ] **Step 6: Update the README**
+- [x] **Step 6: Update the README**
 
 In `expense-intake/README.md`, add a new `## Routes` bullet (as its own top-level list item, after the existing `GET /receipts/:key` bullet) and a new section after `## Twilio secrets`:
 
@@ -7707,12 +7707,12 @@ built: save-contact onboarding (step 8) and the onboarding CLI script
 before the pipeline can file to their Sheet.
 ```
 
-- [ ] **Step 7: Run the full suite one more time**
+- [x] **Step 7: Run the full suite one more time**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 8: Stage the change**
+- [x] **Step 8: Stage the change**
 
 ```bash
 git add expense-intake/src/index.js expense-intake/test/index.test.js expense-intake/wrangler.toml expense-intake/README.md

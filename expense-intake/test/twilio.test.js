@@ -1,8 +1,18 @@
 // expense-intake/test/twilio.test.js
 import crypto from 'node:crypto';
-import { parseFormBody, verifyTwilioSignature, extractWebhookFields } from '../src/twilio.js';
+import { parseFormBody, verifyTwilioSignature, extractWebhookFields, sendSms } from '../src/twilio.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function fakeFetch(ok, status, body) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    return { ok, status, json: async () => body };
+  };
+  fn.calls = calls;
+  return fn;
+}
 
 function computeExpectedSignature(url, params, authToken) {
   const sortedKeys = Object.keys(params).sort();
@@ -71,6 +81,27 @@ async function main() {
   // extractWebhookFields: missing MessageSid defaults to an empty string, not undefined
   const noSid = extractWebhookFields({ From: '+1', To: '+2', Body: 'hi', NumMedia: '0' });
   assert(noSid.messageSid === '', 'a missing MessageSid must default to an empty string');
+
+  // sendSms
+  const sendFetch = fakeFetch(true, 201, { sid: 'SM123', status: 'queued' });
+  const sendResult = await sendSms({ accountSid: 'AC_test', authToken: 'test_auth_token', from: '+15559876543', to: '+15551234567', body: 'Test message', fetchImpl: sendFetch });
+  assert(sendResult.sid === 'SM123', 'sendSms must return the parsed Twilio API response');
+  const sendCall = sendFetch.calls[0];
+  assert(sendCall.url === 'https://api.twilio.com/2010-04-01/Accounts/AC_test/Messages.json', 'sendSms must hit the Twilio Messages resource for the given accountSid');
+  assert(sendCall.init.headers.Authorization === `Basic ${Buffer.from('AC_test:test_auth_token').toString('base64')}`, 'sendSms must send Basic Auth using accountSid:authToken');
+  const sendBody = new URLSearchParams(sendCall.init.body);
+  assert(sendBody.get('To') === '+15551234567' && sendBody.get('From') === '+15559876543' && sendBody.get('Body') === 'Test message', 'sendSms must form-encode To/From/Body');
+
+  // sendSms: error path
+  const failFetch = fakeFetch(false, 400, { code: 21211, message: 'Invalid To Phone Number' });
+  let threwSend = false;
+  try {
+    await sendSms({ accountSid: 'AC_test', authToken: 'test_auth_token', from: '+15559876543', to: 'bad', body: 'x', fetchImpl: failFetch });
+  } catch (err) {
+    threwSend = true;
+    assert(err.message === 'Invalid To Phone Number', 'sendSms must surface the Twilio API error message');
+  }
+  assert(threwSend, 'a non-2xx Twilio response must throw');
 
   console.log('PASS: twilio.test.js');
 }

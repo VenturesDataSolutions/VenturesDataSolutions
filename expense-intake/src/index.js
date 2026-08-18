@@ -1,4 +1,8 @@
 import { handleSmsWebhook, handleGetReceipt } from './handlers.js';
+import { purgeExpiredPendingReviews, sendMonthlyNudges } from './scheduled.js';
+
+const DAILY_PURGE_CRON = '0 3 * * *';
+const MONTHLY_NUDGE_CRON = '0 9 1 * *';
 
 export default {
   async fetch(request, env) {
@@ -32,5 +36,17 @@ export default {
       status: 404,
       headers: { 'Content-Type': 'application/json' },
     });
+  },
+
+  async scheduled(event, env, ctx) {
+    if (event.cron === DAILY_PURGE_CRON) {
+      await purgeExpiredPendingReviews(env);
+      return;
+    }
+    if (event.cron === MONTHLY_NUDGE_CRON) {
+      await sendMonthlyNudges(env);
+      return;
+    }
+    console.error('Unrecognized cron trigger fired', { cron: event.cron });
   },
 };

@@ -22,8 +22,12 @@ binding = "IMAGES"
 binding = "CONVERSATION_STATE"
 id = "a0e34af4cb9245d7bf906256e49c5db5"
 
-# CONVERSATION_STATE (above) is also used by Build Order step 5 for house-selection
-# pending state and the 10-minute correction window — one namespace, multiple key
-# prefixes ("processed:", and step 5's own prefix once it exists).
-# Routes and [[triggers]] cron entries are added in later Build Order steps (7-ish)
-# once the code that uses them exists.
+# CONVERSATION_STATE (above) is also used by Build Order steps 5-6 for house-selection
+# state, the 10-minute correction window, and the pending-review queue cursor — one
+# namespace, multiple key prefixes.
+
+[triggers]
+crons = [
+  "0 3 * * *",  # daily purge — DAILY_PURGE_CRON in src/index.js
+  "0 9 1 * *",  # monthly nudge — MONTHLY_NUDGE_CRON in src/index.js
+]

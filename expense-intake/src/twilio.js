@@ -63,3 +63,26 @@ export function extractWebhookFields(params) {
   }
   return { from: params.From || '', to: params.To || '', body: params.Body || '', media, messageSid: params.MessageSid || '' };
 }
+
+// Twilio's outbound REST API — the first outbound-send capability this Worker has needed;
+// every reply built in earlier Build Order steps has been a synchronous TwiML response to
+// an inbound webhook, which a Cron Trigger has no inbound request to piggyback on.
+export async function sendSms({ accountSid, authToken, from, to, body, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+  const response = await doFetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${basicAuth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ To: to, From: from, Body: body }).toString(),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.message) || `Twilio send failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}

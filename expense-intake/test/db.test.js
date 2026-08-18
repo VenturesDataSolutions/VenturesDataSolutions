@@ -10,6 +10,9 @@ import {
   updateExpenseHouse,
   findOldestPendingReviewForClient,
   findNextPendingReviewForClient,
+  deleteExpiredPendingReviews,
+  findActiveClientsWithPendingCounts,
+  findAuthorizedSendersForClient,
 } from '../src/db.js';
 import { createFakeD1 } from './fake-d1.js';
 
@@ -153,6 +156,25 @@ async function main() {
   const db16 = createFakeD1({ 'SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1': null });
   const noNext = await findNextPendingReviewForClient(db16, 1, 999);
   assert(noNext === null, 'findNextPendingReviewForClient must return null when there is no item after the cursor');
+
+  // deleteExpiredPendingReviews
+  const db17 = createFakeD1({ 'DELETE FROM pending_review WHERE expires_at < ?': { success: true, meta: { changes: 3 } } });
+  const deletedCount = await deleteExpiredPendingReviews(db17, '2026-08-18T00:00:00.000Z');
+  assert(deletedCount === 3, 'deleteExpiredPendingReviews must return the number of rows deleted');
+  assert(db17.calls[0].params[0] === '2026-08-18T00:00:00.000Z', 'must bind the current time as the expiry cutoff');
+
+  // findActiveClientsWithPendingCounts
+  const pendingCounts = [{ client_id: 1, twilio_number: '+15559876543', pending_count: 2 }];
+  const db18 = createFakeD1({ "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": pendingCounts });
+  const counts = await findActiveClientsWithPendingCounts(db18);
+  assert(counts === pendingCounts, 'findActiveClientsWithPendingCounts must return the results array from the fake DB');
+
+  // findAuthorizedSendersForClient
+  const senders = [{ id: 5, client_id: 1, phone_number: '+15551234567' }, { id: 6, client_id: 1, phone_number: '+15559998888' }];
+  const db19 = createFakeD1({ 'SELECT * FROM authorized_senders WHERE client_id = ?': senders });
+  const foundSenders = await findAuthorizedSendersForClient(db19, 1);
+  assert(foundSenders === senders, 'findAuthorizedSendersForClient must return the results array from the fake DB');
+  assert(db19.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
 
   console.log('PASS: db.test.js');
 }

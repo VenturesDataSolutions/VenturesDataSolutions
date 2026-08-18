@@ -52,3 +52,20 @@ export async function findOldestPendingReviewForClient(db, clientId) {
 export async function findNextPendingReviewForClient(db, clientId, afterId) {
   return db.prepare('SELECT * FROM pending_review WHERE client_id = ? AND id > ? ORDER BY id ASC LIMIT 1').bind(clientId, afterId).first();
 }
+
+export async function deleteExpiredPendingReviews(db, nowIso) {
+  const result = await db.prepare('DELETE FROM pending_review WHERE expires_at < ?').bind(nowIso).run();
+  return result.meta.changes;
+}
+
+export async function findActiveClientsWithPendingCounts(db) {
+  const result = await db
+    .prepare("SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id")
+    .all();
+  return result.results;
+}
+
+export async function findAuthorizedSendersForClient(db, clientId) {
+  const result = await db.prepare('SELECT * FROM authorized_senders WHERE client_id = ?').bind(clientId).all();
+  return result.results;
+}

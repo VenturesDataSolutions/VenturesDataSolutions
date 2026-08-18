@@ -71,6 +71,30 @@ async function main() {
   response = await workerModule.fetch(request, baseEnv());
   assert(response.status === 404, 'a missing receipt key must 404 through the real route');
 
+  // scheduled(): the daily purge cron deletes expired pending_review rows through the real handler
+  const purgeDb = createFakeD1({ 'DELETE FROM pending_review WHERE expires_at < ?': { success: true, meta: { changes: 2 } } });
+  await workerModule.scheduled({ cron: '0 3 * * *' }, baseEnv({ DB: purgeDb }), {});
+  assert(purgeDb.calls.some((c) => c.sql.includes('DELETE FROM pending_review')), 'the daily purge cron must delete expired pending_review rows through the real scheduled handler');
+
+  // scheduled(): the monthly nudge cron routes to sendMonthlyNudges through the real handler.
+  // No active clients have pending items in this fake DB, so sendMonthlyNudges returns before
+  // ever calling generateSmsCopy/sendSms — this test only proves the cron-string dispatch is
+  // wired correctly, not the nudge-sending logic itself (that's Task 36's scheduled.test.js).
+  const nudgeDb = createFakeD1({
+    "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": [],
+  });
+  await workerModule.scheduled({ cron: '0 9 1 * *' }, baseEnv({ DB: nudgeDb }), {});
+  assert(nudgeDb.calls.some((c) => c.sql.includes('COUNT(pr.id)')), 'the monthly nudge cron must query for active clients with pending items through the real scheduled handler');
+
+  // scheduled(): an unrecognized cron string must not throw
+  let threwUnrecognized = false;
+  try {
+    await workerModule.scheduled({ cron: '* * * * *' }, baseEnv({ DB: createFakeD1() }), {});
+  } catch {
+    threwUnrecognized = true;
+  }
+  assert(!threwUnrecognized, 'an unrecognized cron string must be logged, not thrown, so a Worker misconfiguration cannot crash a scheduled invocation');
+
   console.log('PASS: index.test.js');
 }
 

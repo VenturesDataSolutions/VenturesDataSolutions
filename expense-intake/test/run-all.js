@@ -14,6 +14,7 @@ import './twiml.test.js';
 import './expense-flow.test.js';
 import './message-dedup.test.js';
 import './conversation-state.test.js';
+import './scheduled.test.js';
 import './handlers.test.js';
 import './index.test.js';
 

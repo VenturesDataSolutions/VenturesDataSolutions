@@ -70,6 +70,7 @@ const FALLBACK_SMS_COPY = {
   correction_confirmed: (vars) => `Updated — moved to ${vars.house}.`,
   pending_item_prompt: (vars) => `Pending: $${vars.amount}, ${vars.category}, ${vars.date}. Reply with the house name to file it, "skip" for the next one, or "delete" to discard.`,
   pending_empty: () => "You're all caught up — no pending items to review.",
+  monthly_nudge: (vars) => `${vars.X} items waiting on your OK. Text 'pending' to review.`,
 };
 
 // A copy-generation failure must never re-trigger writes that already succeeded. By the
@@ -80,7 +81,7 @@ const FALLBACK_SMS_COPY = {
 // (Task 16) — the retry would reprocess from scratch. Falling back to static copy instead
 // means the pipeline always finishes, gets cached, and Twilio never retries a message whose
 // writes already succeeded.
-async function safeGenerateSmsCopy(type, vars, env, deps) {
+export async function safeGenerateSmsCopy(type, vars, env, deps) {
   try {
     return await generateSmsCopy(type, vars, env, deps);
   } catch (err) {
