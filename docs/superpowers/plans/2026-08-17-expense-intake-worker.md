@@ -7053,3 +7053,679 @@ git add expense-intake/README.md
 **Placeholder scan:** No TBD/TODO markers. No new secrets or bindings were introduced this step (reuses the existing `CONVERSATION_STATE` KV namespace and `DB` binding).
 
 **Type consistency:** `showPendingItemOrEmpty({ item, phone, env, deps })` is called identically by `handlePendingCommand` and both branches of `handlePendingQueueReply` in Task 31. `pending_queue` state (`{ pendingReviewId }`) is written/read/cleared with the same shape across `conversation-state.js` (Task 30) and every call site in `expense-flow.js` (Task 31) — no call site expects a richer shape (e.g. an item list) than what's actually stored. `findOldestPendingReviewForClient`/`findNextPendingReviewForClient` (Task 28) are called with the same argument order (`db, clientId[, afterId]`) in both their own tests and Task 31. The house-match resolution branch in `handlePendingQueueReply` mirrors Step 5's `handleAwaitingHouseReply` match branch line-for-line in how it builds `parsed` from a `pending_review` row — the same shape (`vendor: null`, `category: category_guess || 'Other'`, etc.) is used both places, so a future change to that mapping would need to stay in sync in exactly two spots, both now clearly cross-referenced in comments.
+
+---
+
+## Step 7: Cron Triggers — daily purge, monthly nudge
+
+**Design spec:** `docs/superpowers/specs/2026-08-18-expense-intake-cron-triggers-design.md` (approved by the project owner). Two independent Cloudflare Cron Triggers: a daily silent purge of expired `pending_review` rows, and a monthly SMS nudge to every authorized sender of every active client with outstanding items.
+
+**Interface (from the design spec):** a new outbound-send function, `sendSms({ accountSid, authToken, from, to, body, fetchImpl })` in `src/twilio.js` (Twilio's REST Messages resource, Basic Auth) — the first outbound capability this Worker has needed, since every prior reply has been a synchronous TwiML response to an inbound webhook. A new `src/scheduled.js` exports `purgeExpiredPendingReviews(env, deps)` and `sendMonthlyNudges(env, deps)`, dispatched from a new `scheduled(event, env, ctx)` handler in `src/index.js` based on `event.cron`.
+
+**Design decisions locked in for this step:**
+- The daily purge is silent — no client-facing message, just a server-side log of how many rows were deleted (`console.log`, visible in `wrangler tail`).
+- The monthly nudge goes to **every** phone number on `authorized_senders` for a client with pending items, not just one "primary" contact — the schema has no primary-contact flag, and any authorized sender might be the one who needs to act.
+- The nudge count is simply the client's **current total** `pending_review` row count at the moment the cron fires — no delta tracking, no per-item "already nudged" state. A client with unresolved items gets reminded every month until the queue is cleared.
+- One sender's outbound send failing (bad number, transient Twilio error) must not stop the rest of that client's senders, or the next client in the loop, from being nudged — `sendMonthlyNudges` catches and logs per-send failures rather than letting one throw abort the whole run.
+- `safeGenerateSmsCopy` (previously a private helper in `expense-flow.js`, used for the AI-with-static-fallback pattern every other SMS in this project already uses) is exported so `scheduled.js` can reuse it rather than duplicating the fallback logic — `FALLBACK_SMS_COPY` gains a `monthly_nudge` entry using the same `[X]` var name already baked into Step 2's shipped `SMS_COPY_ANCHORS.monthly_nudge` text.
+- `wrangler.toml`'s two cron expressions are named constants in `index.js` (`DAILY_PURGE_CRON`/`MONTHLY_NUDGE_CRON`) so `event.cron`'s dispatch is self-documenting rather than requiring the reader to decode cron syntax to know which job fired.
+
+### Task 33: Outbound SMS — `sendSms` in `twilio.js`
+
+**Files:**
+- Modify: `expense-intake/src/twilio.js`
+- Modify: `expense-intake/test/twilio.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Update the import at the top of `expense-intake/test/twilio.test.js`:
+
+```js
+import { parseFormBody, verifyTwilioSignature, extractWebhookFields, sendSms } from '../src/twilio.js';
+```
+
+Add this helper function above `async function main()`:
+
+```js
+function fakeFetch(ok, status, body) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    return { ok, status, json: async () => body };
+  };
+  fn.calls = calls;
+  return fn;
+}
+```
+
+Insert this block into `main()`, immediately before `console.log('PASS: twilio.test.js');`:
+
+```js
+  // sendSms
+  const sendFetch = fakeFetch(true, 201, { sid: 'SM123', status: 'queued' });
+  const sendResult = await sendSms({ accountSid: 'AC_test', authToken: 'test_auth_token', from: '+15559876543', to: '+15551234567', body: 'Test message', fetchImpl: sendFetch });
+  assert(sendResult.sid === 'SM123', 'sendSms must return the parsed Twilio API response');
+  const sendCall = sendFetch.calls[0];
+  assert(sendCall.url === 'https://api.twilio.com/2010-04-01/Accounts/AC_test/Messages.json', 'sendSms must hit the Twilio Messages resource for the given accountSid');
+  assert(sendCall.init.headers.Authorization === `Basic ${Buffer.from('AC_test:test_auth_token').toString('base64')}`, 'sendSms must send Basic Auth using accountSid:authToken');
+  const sendBody = new URLSearchParams(sendCall.init.body);
+  assert(sendBody.get('To') === '+15551234567' && sendBody.get('From') === '+15559876543' && sendBody.get('Body') === 'Test message', 'sendSms must form-encode To/From/Body');
+
+  // sendSms: error path
+  const failFetch = fakeFetch(false, 400, { code: 21211, message: 'Invalid To Phone Number' });
+  let threwSend = false;
+  try {
+    await sendSms({ accountSid: 'AC_test', authToken: 'test_auth_token', from: '+15559876543', to: 'bad', body: 'x', fetchImpl: failFetch });
+  } catch (err) {
+    threwSend = true;
+    assert(err.message === 'Invalid To Phone Number', 'sendSms must surface the Twilio API error message');
+  }
+  assert(threwSend, 'a non-2xx Twilio response must throw');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/twilio.test.js`
+Expected: fails — `sendSms` is not yet exported from `../src/twilio.js`.
+
+- [ ] **Step 3: Add the function**
+
+Append to `expense-intake/src/twilio.js`:
+
+```js
+
+// Twilio's outbound REST API — the first outbound-send capability this Worker has needed;
+// every reply built in earlier Build Order steps has been a synchronous TwiML response to
+// an inbound webhook, which a Cron Trigger has no inbound request to piggyback on.
+export async function sendSms({ accountSid, authToken, from, to, body, fetchImpl }) {
+  const doFetch = fetchImpl || fetch;
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+  const response = await doFetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${basicAuth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ To: to, From: from, Body: body }).toString(),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const message = (data && data.message) || `Twilio send failed with status ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/twilio.test.js`
+Expected: `PASS: twilio.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/twilio.js expense-intake/test/twilio.test.js
+```
+
+---
+
+### Task 34: D1 query helpers — expired purge, active-clients-with-pending, senders-for-client
+
+**Files:**
+- Modify: `expense-intake/src/db.js`
+- Modify: `expense-intake/test/db.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+Add `deleteExpiredPendingReviews, findActiveClientsWithPendingCounts, findAuthorizedSendersForClient` to the existing import from `'../src/db.js'` in `expense-intake/test/db.test.js`. Insert this block into `main()`, immediately before `console.log('PASS: db.test.js');`:
+
+```js
+  // deleteExpiredPendingReviews
+  const db17 = createFakeD1({ 'DELETE FROM pending_review WHERE expires_at < ?': { success: true, meta: { changes: 3 } } });
+  const deletedCount = await deleteExpiredPendingReviews(db17, '2026-08-18T00:00:00.000Z');
+  assert(deletedCount === 3, 'deleteExpiredPendingReviews must return the number of rows deleted');
+  assert(db17.calls[0].params[0] === '2026-08-18T00:00:00.000Z', 'must bind the current time as the expiry cutoff');
+
+  // findActiveClientsWithPendingCounts
+  const pendingCounts = [{ client_id: 1, twilio_number: '+15559876543', pending_count: 2 }];
+  const db18 = createFakeD1({ "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": pendingCounts });
+  const counts = await findActiveClientsWithPendingCounts(db18);
+  assert(counts === pendingCounts, 'findActiveClientsWithPendingCounts must return the results array from the fake DB');
+
+  // findAuthorizedSendersForClient
+  const senders = [{ id: 5, client_id: 1, phone_number: '+15551234567' }, { id: 6, client_id: 1, phone_number: '+15559998888' }];
+  const db19 = createFakeD1({ 'SELECT * FROM authorized_senders WHERE client_id = ?': senders });
+  const foundSenders = await findAuthorizedSendersForClient(db19, 1);
+  assert(foundSenders === senders, 'findAuthorizedSendersForClient must return the results array from the fake DB');
+  assert(db19.calls[0].params[0] === 1, 'must bind clientId as the query parameter');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/db.test.js`
+Expected: fails — `deleteExpiredPendingReviews`/`findActiveClientsWithPendingCounts`/`findAuthorizedSendersForClient` are not yet exported from `../src/db.js`.
+
+- [ ] **Step 3: Add the query helpers**
+
+Append to `expense-intake/src/db.js`:
+
+```js
+
+export async function deleteExpiredPendingReviews(db, nowIso) {
+  const result = await db.prepare('DELETE FROM pending_review WHERE expires_at < ?').bind(nowIso).run();
+  return result.meta.changes;
+}
+
+export async function findActiveClientsWithPendingCounts(db) {
+  const result = await db
+    .prepare("SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id")
+    .all();
+  return result.results;
+}
+
+export async function findAuthorizedSendersForClient(db, clientId) {
+  const result = await db.prepare('SELECT * FROM authorized_senders WHERE client_id = ?').bind(clientId).all();
+  return result.results;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/db.test.js`
+Expected: `PASS: db.test.js`
+
+- [ ] **Step 5: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 6: Stage the change**
+
+```bash
+git add expense-intake/src/db.js expense-intake/test/db.test.js
+```
+
+---
+
+### Task 35: Export `safeGenerateSmsCopy` and add the `monthly_nudge` fallback
+
+**Files:**
+- Modify: `expense-intake/src/expense-flow.js`
+
+No new test file for this task — the `monthly_nudge` fallback is exercised by Task 36's `scheduled.test.js`, which imports and calls the now-exported `safeGenerateSmsCopy` indirectly through `sendMonthlyNudges`. This is a mechanical, non-behavior-changing edit to already-tested code (exporting a function and adding one more entry to an existing lookup table), not new business logic in its own right.
+
+- [ ] **Step 1: Export the function**
+
+In `expense-intake/src/expense-flow.js`, change:
+
+```js
+async function safeGenerateSmsCopy(type, vars, env, deps) {
+```
+
+to:
+
+```js
+export async function safeGenerateSmsCopy(type, vars, env, deps) {
+```
+
+- [ ] **Step 2: Add the fallback entry**
+
+In `expense-intake/src/expense-flow.js`, add to `FALLBACK_SMS_COPY`, immediately after `pending_empty`:
+
+```js
+  monthly_nudge: (vars) => `${vars.X} items waiting on your OK. Text 'pending' to review.`,
+```
+
+- [ ] **Step 3: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 4: Stage the change**
+
+```bash
+git add expense-intake/src/expense-flow.js
+```
+
+---
+
+### Task 36: `src/scheduled.js` — the two Cron-triggered jobs
+
+**Files:**
+- Create: `expense-intake/src/scheduled.js`
+- Create: `expense-intake/test/scheduled.test.js`
+- Modify: `expense-intake/test/run-all.js`
+
+- [ ] **Step 1: Write the failing test**
+
+```js
+// expense-intake/test/scheduled.test.js
+import { purgeExpiredPendingReviews, sendMonthlyNudges } from '../src/scheduled.js';
+import { createFakeD1 } from './fake-d1.js';
+
+function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
+
+function fakeFetch(handlers) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    for (const [match, respond] of handlers) {
+      if (url.includes(match)) return respond(url, init);
+    }
+    throw new Error(`Unhandled fetch in test: ${url}`);
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+function chatResponse(content) {
+  return { choices: [{ message: { content } }] };
+}
+
+function baseEnv(db, overrides = {}) {
+  return {
+    DB: db,
+    AI_PROVIDER: 'openrouter',
+    OPENROUTER_API_KEY: 'or_key',
+    TWILIO_ACCOUNT_SID: 'AC_test',
+    TWILIO_AUTH_TOKEN: 'test_auth_token',
+    ...overrides,
+  };
+}
+
+async function main() {
+  // purgeExpiredPendingReviews
+  {
+    const db = createFakeD1({ 'DELETE FROM pending_review WHERE expires_at < ?': { success: true, meta: { changes: 4 } } });
+    const result = await purgeExpiredPendingReviews(baseEnv(db));
+    assert(result.deletedCount === 4, 'purgeExpiredPendingReviews must return the number of rows deleted');
+    const call = db.calls[0];
+    assert(call.sql.includes('DELETE FROM pending_review'), 'must delete from pending_review');
+    assert(/^\d{4}-\d{2}-\d{2}T/.test(call.params[0]), 'must bind an ISO timestamp as the expiry cutoff');
+  }
+
+  // sendMonthlyNudges: no active clients with pending items -> nothing sent
+  {
+    const db = createFakeD1({
+      "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": [],
+    });
+    const fetchImpl = fakeFetch([]);
+    const result = await sendMonthlyNudges(baseEnv(db), { fetchImpl });
+    assert(result.sentCount === 0, 'no active clients with pending items must send nothing');
+    assert(fetchImpl.calls.length === 0, 'no fetch calls should happen when there is nothing to nudge about');
+  }
+
+  // sendMonthlyNudges: one client, two authorized senders -> both get nudged
+  {
+    const pendingCounts = [{ client_id: 1, twilio_number: '+15559876543', pending_count: 2 }];
+    const senders = [{ id: 5, client_id: 1, phone_number: '+15551234567' }, { id: 6, client_id: 1, phone_number: '+15559998888' }];
+    const db = createFakeD1({
+      "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": pendingCounts,
+      'SELECT * FROM authorized_senders WHERE client_id = ?': senders,
+    });
+    const fetchImpl = fakeFetch([
+      ['openrouter.ai', async () => ({ ok: true, status: 200, json: async () => chatResponse("2 items waiting on your OK. Text 'pending' to review.") })],
+      ['api.twilio.com', async () => ({ ok: true, status: 201, json: async () => ({ sid: 'SM1' }) })],
+    ]);
+    const result = await sendMonthlyNudges(baseEnv(db), { fetchImpl });
+    assert(result.sentCount === 2, 'both authorized senders must be counted as sent');
+    const twilioCalls = fetchImpl.calls.filter((c) => c.url.includes('api.twilio.com'));
+    assert(twilioCalls.length === 2, 'must send one outbound SMS per authorized sender');
+    const toNumbers = twilioCalls.map((c) => new URLSearchParams(c.init.body).get('To'));
+    assert(toNumbers.includes('+15551234567') && toNumbers.includes('+15559998888'), 'must send to every authorized sender phone number, not just one');
+    const fromNumbers = twilioCalls.map((c) => new URLSearchParams(c.init.body).get('From'));
+    assert(fromNumbers.every((from) => from === '+15559876543'), "must send from the client's own twilio_number");
+  }
+
+  // sendMonthlyNudges: one sender's send fails -> the other still gets nudged, no throw
+  {
+    const pendingCounts = [{ client_id: 1, twilio_number: '+15559876543', pending_count: 1 }];
+    const senders = [{ id: 5, client_id: 1, phone_number: '+15551234567' }, { id: 6, client_id: 1, phone_number: '+15559998888' }];
+    const db = createFakeD1({
+      "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": pendingCounts,
+      'SELECT * FROM authorized_senders WHERE client_id = ?': senders,
+    });
+    let twilioCallCount = 0;
+    const fetchImpl = fakeFetch([
+      ['openrouter.ai', async () => ({ ok: true, status: 200, json: async () => chatResponse("1 item waiting on your OK. Text 'pending' to review.") })],
+      ['api.twilio.com', async () => {
+        twilioCallCount++;
+        if (twilioCallCount === 1) {
+          return { ok: false, status: 400, json: async () => ({ code: 21211, message: 'Invalid To Phone Number' }) };
+        }
+        return { ok: true, status: 201, json: async () => ({ sid: 'SM2' }) };
+      }],
+    ]);
+    const result = await sendMonthlyNudges(baseEnv(db), { fetchImpl });
+    assert(result.sentCount === 1, 'a failed send for one sender must not be counted, but must not stop the other from being sent');
+  }
+
+  // sendMonthlyNudges: generateSmsCopy fails -> falls back to static monthly_nudge copy
+  {
+    const pendingCounts = [{ client_id: 1, twilio_number: '+15559876543', pending_count: 3 }];
+    const senders = [{ id: 5, client_id: 1, phone_number: '+15551234567' }];
+    const db = createFakeD1({
+      "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": pendingCounts,
+      'SELECT * FROM authorized_senders WHERE client_id = ?': senders,
+    });
+    const fetchImpl = fakeFetch([
+      ['openrouter.ai', async () => ({ ok: false, status: 500, json: async () => ({ error: { message: 'upstream error' } }) })],
+      ['api.twilio.com', async () => ({ ok: true, status: 201, json: async () => ({ sid: 'SM3' }) })],
+    ]);
+    const result = await sendMonthlyNudges(baseEnv(db), { fetchImpl });
+    assert(result.sentCount === 1, 'a copy-generation failure must not prevent the nudge from being sent with fallback copy');
+    const twilioCall = fetchImpl.calls.find((c) => c.url.includes('api.twilio.com'));
+    const sentBody = new URLSearchParams(twilioCall.init.body).get('Body');
+    assert(sentBody === "3 items waiting on your OK. Text 'pending' to review.", 'the fallback monthly_nudge copy must substitute the real pending count');
+  }
+
+  console.log('PASS: scheduled.test.js');
+}
+
+await main();
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/scheduled.test.js`
+Expected: fails with a module-not-found error for `../src/scheduled.js` (it doesn't exist yet).
+
+- [ ] **Step 3: Write the module**
+
+```js
+// expense-intake/src/scheduled.js
+import { deleteExpiredPendingReviews, findActiveClientsWithPendingCounts, findAuthorizedSendersForClient } from './db.js';
+import { sendSms } from './twilio.js';
+import { safeGenerateSmsCopy } from './expense-flow.js';
+
+export async function purgeExpiredPendingReviews(env, deps = {}) {
+  const nowIso = new Date().toISOString();
+  const deletedCount = await deleteExpiredPendingReviews(env.DB, nowIso);
+  console.log('Purged expired pending_review rows', { deletedCount });
+  return { deletedCount };
+}
+
+export async function sendMonthlyNudges(env, deps = {}) {
+  const clients = await findActiveClientsWithPendingCounts(env.DB);
+  let sentCount = 0;
+  for (const client of clients) {
+    const senders = await findAuthorizedSendersForClient(env.DB, client.client_id);
+    const body = await safeGenerateSmsCopy('monthly_nudge', { X: client.pending_count }, env, deps);
+    for (const sender of senders) {
+      try {
+        await sendSms({
+          accountSid: env.TWILIO_ACCOUNT_SID,
+          authToken: env.TWILIO_AUTH_TOKEN,
+          from: client.twilio_number,
+          to: sender.phone_number,
+          body,
+          fetchImpl: deps.fetchImpl,
+        });
+        sentCount++;
+      } catch (err) {
+        // One sender's outbound send failing (bad number, Twilio hiccup) must not stop the
+        // rest of this client's senders, or the next client in the loop, from being nudged.
+        console.error('Failed to send monthly nudge', { clientId: client.client_id, phone: sender.phone_number, error: err.message });
+      }
+    }
+  }
+  console.log('Sent monthly nudges', { sentCount });
+  return { sentCount };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node expense-intake/test/scheduled.test.js`
+Expected: `PASS: scheduled.test.js`
+
+- [ ] **Step 5: Wire the new test into the runner**
+
+```js
+// expense-intake/test/run-all.js
+import './schema.test.js';
+import './migration-0002.test.js';
+import './providers/shared.test.js';
+import './providers/openrouter.test.js';
+import './providers/anthropic.test.js';
+import './providers/index.test.js';
+import './twilio.test.js';
+import './receipt-storage.test.js';
+import './db.test.js';
+import './google-auth.test.js';
+import './sheets.test.js';
+import './twiml.test.js';
+import './expense-flow.test.js';
+import './message-dedup.test.js';
+import './conversation-state.test.js';
+import './scheduled.test.js';
+import './handlers.test.js';
+import './index.test.js';
+
+console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
+```
+
+- [ ] **Step 6: Run the full suite to confirm no regressions**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 7: Stage the change**
+
+```bash
+git add expense-intake/src/scheduled.js expense-intake/test/scheduled.test.js expense-intake/test/run-all.js
+```
+
+---
+
+### Task 37: Wire `scheduled()` into `index.js`, `wrangler.toml` crons, and docs
+
+**Files:**
+- Modify: `expense-intake/src/index.js` (full replacement)
+- Modify: `expense-intake/test/index.test.js`
+- Modify: `expense-intake/wrangler.toml`
+- Modify: `expense-intake/README.md`
+
+- [ ] **Step 1: Write the failing test**
+
+Insert this block into `main()` of `expense-intake/test/index.test.js`, immediately before `console.log('PASS: index.test.js');`:
+
+```js
+  // scheduled(): the daily purge cron deletes expired pending_review rows through the real handler
+  const purgeDb = createFakeD1({ 'DELETE FROM pending_review WHERE expires_at < ?': { success: true, meta: { changes: 2 } } });
+  await workerModule.scheduled({ cron: '0 3 * * *' }, baseEnv({ DB: purgeDb }), {});
+  assert(purgeDb.calls.some((c) => c.sql.includes('DELETE FROM pending_review')), 'the daily purge cron must delete expired pending_review rows through the real scheduled handler');
+
+  // scheduled(): the monthly nudge cron routes to sendMonthlyNudges through the real handler.
+  // No active clients have pending items in this fake DB, so sendMonthlyNudges returns before
+  // ever calling generateSmsCopy/sendSms — this test only proves the cron-string dispatch is
+  // wired correctly, not the nudge-sending logic itself (that's Task 36's scheduled.test.js).
+  const nudgeDb = createFakeD1({
+    "SELECT c.id AS client_id, c.twilio_number AS twilio_number, COUNT(pr.id) AS pending_count FROM clients c JOIN pending_review pr ON pr.client_id = c.id WHERE c.status = 'active' GROUP BY c.id": [],
+  });
+  await workerModule.scheduled({ cron: '0 9 1 * *' }, baseEnv({ DB: nudgeDb }), {});
+  assert(nudgeDb.calls.some((c) => c.sql.includes('COUNT(pr.id)')), 'the monthly nudge cron must query for active clients with pending items through the real scheduled handler');
+
+  // scheduled(): an unrecognized cron string must not throw
+  let threwUnrecognized = false;
+  try {
+    await workerModule.scheduled({ cron: '* * * * *' }, baseEnv({ DB: createFakeD1() }), {});
+  } catch {
+    threwUnrecognized = true;
+  }
+  assert(!threwUnrecognized, 'an unrecognized cron string must be logged, not thrown, so a Worker misconfiguration cannot crash a scheduled invocation');
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node expense-intake/test/index.test.js`
+Expected: fails — `workerModule.scheduled` is not yet defined (the current `export default` only has `fetch`).
+
+- [ ] **Step 3: Rewrite `src/index.js`**
+
+Replace `expense-intake/src/index.js` in full:
+
+```js
+// expense-intake/src/index.js — full replacement
+import { handleSmsWebhook, handleGetReceipt } from './handlers.js';
+import { purgeExpiredPendingReviews, sendMonthlyNudges } from './scheduled.js';
+
+const DAILY_PURGE_CRON = '0 3 * * *';
+const MONTHLY_NUDGE_CRON = '0 9 1 * *';
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (request.method === 'POST' && url.pathname === '/sms') {
+      const bodyText = await request.text();
+      const signature = request.headers.get('X-Twilio-Signature') || '';
+      const result = await handleSmsWebhook({ url: request.url, bodyText, signature, env });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    if (request.method === 'GET' && url.pathname.startsWith('/receipts/')) {
+      let key;
+      try {
+        key = decodeURIComponent(url.pathname.slice('/receipts/'.length));
+      } catch {
+        return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain' } });
+      }
+      const result = await handleGetReceipt({ key, bucket: env.RECEIPTS_BUCKET });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    return new Response(JSON.stringify({ error: 'not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+
+  async scheduled(event, env, ctx) {
+    if (event.cron === DAILY_PURGE_CRON) {
+      await purgeExpiredPendingReviews(env);
+      return;
+    }
+    if (event.cron === MONTHLY_NUDGE_CRON) {
+      await sendMonthlyNudges(env);
+      return;
+    }
+    console.error('Unrecognized cron trigger fired', { cron: event.cron });
+  },
+};
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `node expense-intake/test/index.test.js`
+Expected: `PASS: index.test.js`
+
+- [ ] **Step 5: Add the `[triggers]` crons to `wrangler.toml`**
+
+Replace the trailing comment block in `expense-intake/wrangler.toml`:
+
+```toml
+# CONVERSATION_STATE (above) is also used by Build Order step 5 for house-selection
+# pending state and the 10-minute correction window — one namespace, multiple key
+# prefixes ("processed:", and step 5's own prefix once it exists).
+# Routes and [[triggers]] cron entries are added in later Build Order steps (7-ish)
+# once the code that uses them exists.
+```
+
+with:
+
+```toml
+# CONVERSATION_STATE (above) is also used by Build Order steps 5-6 for house-selection
+# state, the 10-minute correction window, and the pending-review queue cursor — one
+# namespace, multiple key prefixes.
+
+[triggers]
+crons = [
+  "0 3 * * *",  # daily purge — DAILY_PURGE_CRON in src/index.js
+  "0 9 1 * *",  # monthly nudge — MONTHLY_NUDGE_CRON in src/index.js
+]
+```
+
+- [ ] **Step 6: Update the README**
+
+In `expense-intake/README.md`, add a new `## Routes` bullet (as its own top-level list item, after the existing `GET /receipts/:key` bullet) and a new section after `## Twilio secrets`:
+
+```markdown
+- **Cron Triggers** (not an HTTP route): a daily job purges expired
+  `pending_review` rows (silent, no client-facing message), and a monthly
+  job texts every authorized sender of every active client with
+  outstanding pending items, using the same `TWILIO_ACCOUNT_SID`/
+  `TWILIO_AUTH_TOKEN` secrets as the inbound webhook. See
+  `docs/superpowers/specs/2026-08-18-expense-intake-cron-triggers-design.md`.
+```
+
+```markdown
+## Testing Cron Triggers locally
+
+`wrangler dev` exposes a special endpoint for firing a configured Cron
+Trigger without waiting for its real schedule:
+
+\`\`\`bash
+curl "http://localhost:8787/__scheduled?cron=0+3+*+*+*"   # daily purge
+curl "http://localhost:8787/__scheduled?cron=0+9+1+*+*"   # monthly nudge
+\`\`\`
+
+The plain-Node test suite (`test/scheduled.test.js`, `test/index.test.js`)
+covers the actual purge/nudge logic and the `event.cron` dispatch without
+needing `wrangler dev` at all — this is only useful for an end-to-end
+manual check against real Twilio/D1.
+```
+
+Update the `## Status` section:
+
+```markdown
+## Status
+
+Build Order steps 1-7: repo scaffolding, D1 schema, the provider
+abstraction, the Twilio inbound webhook with R2 photo storage, the full
+happy-path pipeline (parse, categorize, file to Sheets/D1 or
+`pending_review`), Twilio-retry dedup protection, the interactive
+house-selection reply flow, the 10-minute post-confirmation correction
+window, the client-initiated `"pending"` review queue, and the daily
+purge / monthly nudge Cron Triggers. See the three specs under
+`docs/superpowers/specs/2026-08-18-*` for those steps' designs. Not yet
+built: save-contact onboarding (step 8) and the onboarding CLI script
+(step 9) — houses currently need a `google_sheet_id` set via manual SQL
+before the pipeline can file to their Sheet.
+```
+
+- [ ] **Step 7: Run the full suite one more time**
+
+Run: `node expense-intake/test/run-all.js`
+Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
+
+- [ ] **Step 8: Stage the change**
+
+```bash
+git add expense-intake/src/index.js expense-intake/test/index.test.js expense-intake/wrangler.toml expense-intake/README.md
+```
+
+---
+
+## Self-Review — Step 7
+
+**Spec coverage for Step 7:** The outbound-SMS capability → Task 33's `sendSms`, matching the design spec's "REST API, Basic Auth" description exactly (same account already used for inbound signature verification and Step 3's MMS media fetch). The silent daily purge → Task 34's `deleteExpiredPendingReviews` + Task 36's `purgeExpiredPendingReviews`, with no SMS copy type or send call anywhere in that path. The monthly nudge fanning out to every authorized sender → Task 34's `findAuthorizedSendersForClient` + Task 36's `sendMonthlyNudges`'s inner loop, and its test explicitly asserts both sender phone numbers receive a send. The "current total, no delta tracking" nudge count → `findActiveClientsWithPendingCounts`'s plain `COUNT(pr.id)` with no "already nudged" filter anywhere in the query or the calling code. Per-send failure isolation → Task 36's try/catch around each `sendSms` call, tested explicitly with one failing send alongside one succeeding one. `event.cron` dispatch → Task 37's `scheduled()` handler and its three test scenarios (purge cron, nudge cron, unrecognized cron).
+
+**Not yet in scope, intentionally (later Build Order steps):** save-contact onboarding (step 8) and the onboarding CLI script (step 9, meaning `houses.google_sheet_id` must still be set by hand, and clients/houses/authorized_senders rows still need manual SQL to create).
+
+**Placeholder scan:** No TBD/TODO markers. No new secrets were introduced — `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` already exist from Step 3 and are reused as-is for outbound sends. The two cron expressions in `wrangler.toml` are real, working schedules (not placeholders) with an explicit "tunable" callout in the design spec for their exact times.
+
+**Type consistency:** `sendSms({ accountSid, authToken, from, to, body, fetchImpl })`'s parameter names match the existing `fetchImpl`-injection convention used by every other outbound-fetch function in this codebase (`appendExpenseRow`, `anthropicMessagesRequest`, etc.). `purgeExpiredPendingReviews(env, deps)`/`sendMonthlyNudges(env, deps)` match the `(env, deps = {})` shape `processExpenseMessage` already established, even though neither currently uses every field of `deps` beyond `fetchImpl`. `findActiveClientsWithPendingCounts`'s result shape (`{ client_id, twilio_number, pending_count }`) is consumed with those exact three field names in `sendMonthlyNudges`, and its test's fixture data matches that shape exactly. `safeGenerateSmsCopy`'s export (Task 35) doesn't change its signature at all — every existing call site inside `expense-flow.js` continues to call it exactly as before, and `scheduled.js` (Task 36) calls it with the identical `(type, vars, env, deps)` argument order.
