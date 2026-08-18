@@ -6,6 +6,9 @@ import {
   extractJsonBlock,
   normalizeParseExpenseResult,
   ProviderParseError,
+  MATCH_HOUSE_SYSTEM_PROMPT,
+  buildMatchHouseUserMessage,
+  normalizeMatchHouseResult,
 } from '../../src/providers/shared.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
@@ -32,6 +35,9 @@ async function main() {
   assert(SMS_COPY_ANCHORS.house_selection.length === 2, 'house_selection must have 2 tone anchors');
   assert(SMS_COPY_ANCHORS.low_confidence.length === 2, 'low_confidence must have 2 tone anchors');
   assert(SMS_COPY_ANCHORS.monthly_nudge.length === 1, 'monthly_nudge must have 1 tone anchor');
+  assert(SMS_COPY_ANCHORS.house_selection_retry.length === 2, 'house_selection_retry must have 2 tone anchors');
+  assert(SMS_COPY_ANCHORS.house_selection_giveup.length === 2, 'house_selection_giveup must have 2 tone anchors');
+  assert(SMS_COPY_ANCHORS.correction_confirmed.length === 2, 'correction_confirmed must have 2 tone anchors');
 
   // buildSmsCopyPrompt: injects vars and anchors, rejects unknown types
   const { system, user } = buildSmsCopyPrompt('confirmation', { amount: '42.50', category: 'Materials', house: '123 Main St' });
@@ -90,6 +96,57 @@ async function main() {
     normalizeParseExpenseResult({ vendor: null, amount: '42.50', category: 'Other', confidence: 0.5, raw_text: '' });
   } catch { threwBadAmount = true; }
   assert(threwBadAmount, 'a string amount must throw (model must return a number, not a string)');
+
+  // buildSmsCopyPrompt must work for each of the three new Step 5 types too (reuses the
+  // same generic machinery already exercised above for confirmation/house_selection/etc.)
+  const retryPrompt = buildSmsCopyPrompt('house_selection_retry', { house_list: '123 Main St or the Duplex' });
+  assert(retryPrompt.user.includes('house_list: 123 Main St or the Duplex'), 'house_selection_retry prompt must carry the actual house list value');
+  const giveupPrompt = buildSmsCopyPrompt('house_selection_giveup', {});
+  assert(giveupPrompt.system.includes('saved'), 'house_selection_giveup prompt must include its tone anchors');
+  const correctionPrompt = buildSmsCopyPrompt('correction_confirmed', { house: '456 Oak Ave' });
+  assert(correctionPrompt.user.includes('house: 456 Oak Ave'), 'correction_confirmed prompt must carry the actual house value');
+
+  // MATCH_HOUSE_SYSTEM_PROMPT: must instruct JSON-only output with a house_id key
+  assert(/house_id/.test(MATCH_HOUSE_SYSTEM_PROMPT), 'match-house prompt must mention house_id');
+  assert(/JSON/i.test(MATCH_HOUSE_SYSTEM_PROMPT), 'match-house prompt must instruct JSON-only output');
+
+  // buildMatchHouseUserMessage: lists houses with id/address/nickname, carries the reply text
+  const matchHouses = [
+    { id: 10, address: '123 Main St', nickname: 'Main St' },
+    { id: 11, address: '456 Oak Ave', nickname: null },
+  ];
+  const matchUserMessage = buildMatchHouseUserMessage('the main st one', matchHouses);
+  assert(matchUserMessage.includes('the main st one'), 'user message must carry the reply text verbatim');
+  assert(matchUserMessage.includes('id: 10') && matchUserMessage.includes('123 Main St') && matchUserMessage.includes('Main St'), "user message must list the first house's id, address, and nickname");
+  assert(matchUserMessage.includes('id: 11') && matchUserMessage.includes('456 Oak Ave'), 'user message must list the second house even without a nickname');
+
+  // normalizeMatchHouseResult: a valid matching house id
+  const matchedHouse = normalizeMatchHouseResult({ house_id: 10 }, matchHouses);
+  assert(matchedHouse.houseId === 10, 'normalizeMatchHouseResult must pass through a valid house_id');
+
+  // normalizeMatchHouseResult: explicit null means no match
+  const noMatchHouse = normalizeMatchHouseResult({ house_id: null }, matchHouses);
+  assert(noMatchHouse.houseId === null, 'normalizeMatchHouseResult must allow house_id: null to mean no confident match');
+
+  // normalizeMatchHouseResult: a house_id not in the provided list throws
+  let threwUnknownHouse = false;
+  try {
+    normalizeMatchHouseResult({ house_id: 999 }, matchHouses);
+  } catch (err) {
+    threwUnknownHouse = true;
+    assert(err instanceof ProviderParseError, 'an out-of-list house_id must throw ProviderParseError');
+  }
+  assert(threwUnknownHouse, 'normalizeMatchHouseResult must reject a house_id that is not one of the provided houses');
+
+  // normalizeMatchHouseResult: a response missing the house_id key throws
+  let threwMissingKey = false;
+  try {
+    normalizeMatchHouseResult({}, matchHouses);
+  } catch (err) {
+    threwMissingKey = true;
+    assert(err instanceof ProviderParseError, 'a response missing house_id must throw ProviderParseError');
+  }
+  assert(threwMissingKey, 'normalizeMatchHouseResult must reject a response with no house_id key at all');
 
   console.log('PASS: providers/shared.test.js');
 }

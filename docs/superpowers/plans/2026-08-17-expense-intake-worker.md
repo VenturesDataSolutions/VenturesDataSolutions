@@ -4005,7 +4005,7 @@ git add expense-intake/src/handlers.js expense-intake/src/index.js expense-intak
 - Modify: `expense-intake/src/providers/shared.js`
 - Modify: `expense-intake/test/providers/shared.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/providers/shared.test.js`:
 
@@ -4070,12 +4070,12 @@ Insert this block into `main()`, immediately before the existing `console.log('P
   assert(threwMissingKey, 'normalizeMatchHouseResult must reject a response with no house_id key at all');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: fails — `MATCH_HOUSE_SYSTEM_PROMPT`/`buildMatchHouseUserMessage`/`normalizeMatchHouseResult` are not yet exported from `../../src/providers/shared.js`.
 
-- [ ] **Step 3: Add the new exports to the shared module**
+- [x] **Step 3: Add the new exports to the shared module**
 
 Append to `expense-intake/src/providers/shared.js` (after `normalizeParseExpenseResult`):
 
@@ -4110,17 +4110,17 @@ export function normalizeMatchHouseResult(raw, houses) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: `PASS: providers/shared.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change (do not commit yet — held for review)**
+- [x] **Step 6: Stage the change (do not commit yet — held for review)**
 
 ```bash
 git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
@@ -4134,7 +4134,7 @@ git add expense-intake/src/providers/shared.js expense-intake/test/providers/sha
 - Modify: `expense-intake/src/providers/openrouter.js`
 - Modify: `expense-intake/test/providers/openrouter.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/providers/openrouter.test.js`:
 
@@ -4166,12 +4166,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: provider
   assert(noMatchResult.houseId === null, 'openRouterMatchHouseFromReply must return houseId: null on no confident match');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/openrouter.test.js`
 Expected: fails — `openRouterMatchHouseFromReply` is not yet exported from `../../src/providers/openrouter.js`.
 
-- [ ] **Step 3: Add the adapter function**
+- [x] **Step 3: Add the adapter function**
 
 Update the import at the top of `expense-intake/src/providers/openrouter.js`:
 
@@ -4193,17 +4193,17 @@ export async function openRouterMatchHouseFromReply({ apiKey, text, houses, fetc
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/providers/openrouter.test.js`
 Expected: `PASS: providers/openrouter.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/providers/openrouter.js expense-intake/test/providers/openrouter.test.js
@@ -4217,7 +4217,7 @@ git add expense-intake/src/providers/openrouter.js expense-intake/test/providers
 - Modify: `expense-intake/src/providers/anthropic.js`
 - Modify: `expense-intake/test/providers/anthropic.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/providers/anthropic.test.js`:
 
@@ -4249,12 +4249,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: provider
   assert(noMatchResult.houseId === null, 'anthropicMatchHouseFromReply must return houseId: null on no confident match');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/anthropic.test.js`
 Expected: fails — `anthropicMatchHouseFromReply` is not yet exported from `../../src/providers/anthropic.js`.
 
-- [ ] **Step 3: Add the adapter function**
+- [x] **Step 3: Add the adapter function**
 
 Update the import at the top of `expense-intake/src/providers/anthropic.js`:
 
@@ -4273,17 +4273,17 @@ export async function anthropicMatchHouseFromReply({ apiKey, text, houses, fetch
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/providers/anthropic.test.js`
 Expected: `PASS: providers/anthropic.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/providers/anthropic.js expense-intake/test/providers/anthropic.test.js
@@ -4297,7 +4297,7 @@ git add expense-intake/src/providers/anthropic.js expense-intake/test/providers/
 - Modify: `expense-intake/src/providers/index.js`
 - Modify: `expense-intake/test/providers/index.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Update the import at the top of `expense-intake/test/providers/index.test.js`:
 
@@ -4326,12 +4326,12 @@ Insert this block into `main()`, immediately before `console.log('PASS: provider
   assert(matchAnt.houseId === null, 'matchHouseFromReply must return houseId: null on no match regardless of provider');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/index.test.js`
 Expected: fails — `matchHouseFromReply` is not yet exported from `../../src/providers/index.js`.
 
-- [ ] **Step 3: Add the selector function**
+- [x] **Step 3: Add the selector function**
 
 Replace `expense-intake/src/providers/index.js` in full:
 
@@ -4368,17 +4368,17 @@ export async function matchHouseFromReply({ text, houses }, env, deps = {}) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/providers/index.test.js`
 Expected: `PASS: providers/index.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/providers/index.js expense-intake/test/providers/index.test.js
@@ -4395,7 +4395,7 @@ git add expense-intake/src/providers/index.js expense-intake/test/providers/inde
 - Modify: `expense-intake/test/db.test.js` (full replacement)
 - Modify: `expense-intake/test/run-all.js`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```sql
 -- This is what expense-intake/migrations/0002_add_sheet_row.sql must eventually contain —
@@ -4563,7 +4563,7 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `node expense-intake/test/migration-0002.test.js`
 Expected: fails with `Error: migrations/0002_add_sheet_row.sql missing`
@@ -4571,7 +4571,7 @@ Expected: fails with `Error: migrations/0002_add_sheet_row.sql missing`
 Run: `node expense-intake/test/db.test.js`
 Expected: fails — `findPendingReviewById`/`deletePendingReview`/`findExpenseById`/`updateExpenseHouse` are not exported yet, and `insertExpense`'s param-count assertion fails against the current 10-param implementation.
 
-- [ ] **Step 3: Write the migration and the db.js additions**
+- [x] **Step 3: Write the migration and the db.js additions**
 
 ```sql
 -- expense-intake/migrations/0002_add_sheet_row.sql
@@ -4630,7 +4630,7 @@ export async function updateExpenseHouse(db, { expenseId, houseId, sheetRow }) {
 }
 ```
 
-- [ ] **Step 4: Wire the new test into the runner**
+- [x] **Step 4: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -4657,12 +4657,12 @@ console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 
 (`./conversation-state.test.js` doesn't exist yet — it's created in Task 24. Adding the import now would break this task's own verification, so leave it out of `run-all.js` until Task 24 and skip straight to `./handlers.test.js` after `./message-dedup.test.js` for now.)
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Validate the migration against real D1 SQLite (local emulation)**
+- [x] **Step 6: Validate the migration against real D1 SQLite (local emulation)**
 
 ```bash
 cd expense-intake
@@ -4672,7 +4672,7 @@ npx wrangler d1 execute expense-intake-db --local --command="PRAGMA table_info(e
 
 Expected: no SQL errors; the second command's output includes a `sheet_row` column.
 
-- [ ] **Step 7: Stage the change**
+- [x] **Step 7: Stage the change**
 
 ```bash
 git add expense-intake/migrations/0002_add_sheet_row.sql expense-intake/test/migration-0002.test.js expense-intake/src/db.js expense-intake/test/db.test.js expense-intake/test/run-all.js
@@ -4686,7 +4686,7 @@ git add expense-intake/migrations/0002_add_sheet_row.sql expense-intake/test/mig
 - Modify: `expense-intake/src/sheets.js`
 - Modify: `expense-intake/test/sheets.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Replace `expense-intake/test/sheets.test.js` in full:
 
@@ -4779,12 +4779,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/sheets.test.js`
 Expected: fails — `extractAppendedRowNumber`/`deleteSheetRow` are not yet exported from `../src/sheets.js`.
 
-- [ ] **Step 3: Write the additions**
+- [x] **Step 3: Write the additions**
 
 Replace `expense-intake/src/sheets.js` in full:
 
@@ -4855,17 +4855,17 @@ export async function deleteSheetRow({ accessToken, spreadsheetId, sheetRow, fet
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/sheets.test.js`
 Expected: `PASS: sheets.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/sheets.js expense-intake/test/sheets.test.js
@@ -4880,7 +4880,7 @@ git add expense-intake/src/sheets.js expense-intake/test/sheets.test.js
 - Create: `expense-intake/test/conversation-state.test.js`
 - Modify: `expense-intake/test/run-all.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // expense-intake/test/conversation-state.test.js
@@ -4947,12 +4947,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/conversation-state.test.js`
 Expected: fails with a module-not-found error for `../src/conversation-state.js` (it doesn't exist yet).
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 ```js
 // expense-intake/src/conversation-state.js
@@ -4990,7 +4990,7 @@ export async function clearCorrectionState(kv, phone) {
 }
 ```
 
-- [ ] **Step 4: Wire the new test into the runner**
+- [x] **Step 4: Wire the new test into the runner**
 
 ```js
 // expense-intake/test/run-all.js
@@ -5015,12 +5015,12 @@ import './index.test.js';
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/conversation-state.js expense-intake/test/conversation-state.test.js expense-intake/test/run-all.js
@@ -5034,7 +5034,7 @@ git add expense-intake/src/conversation-state.js expense-intake/test/conversatio
 - Modify: `expense-intake/src/providers/shared.js`
 - Modify: `expense-intake/test/providers/shared.test.js`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Insert this block into `main()` of `expense-intake/test/providers/shared.test.js`, immediately after the existing `SMS_COPY_ANCHORS.monthly_nudge` assertion and before the `buildSmsCopyPrompt` section:
 
@@ -5057,12 +5057,12 @@ Insert this block into `main()`, immediately before the Task 18 additions (i.e. 
   assert(correctionPrompt.user.includes('house: 456 Oak Ave'), 'correction_confirmed prompt must carry the actual house value');
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: fails — `SMS_COPY_ANCHORS.house_selection_retry` (and the other two) are `undefined`.
 
-- [ ] **Step 3: Add the new anchors**
+- [x] **Step 3: Add the new anchors**
 
 In `expense-intake/src/providers/shared.js`, add three keys to `SMS_COPY_ANCHORS`, immediately after `monthly_nudge`:
 
@@ -5083,17 +5083,17 @@ In `expense-intake/src/providers/shared.js`, add three keys to `SMS_COPY_ANCHORS
 
 (`buildSmsCopyPrompt` already handles any type present in `SMS_COPY_ANCHORS` generically — no other code change is needed for these three new types to work.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `node expense-intake/test/providers/shared.test.js`
 Expected: `PASS: providers/shared.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/providers/shared.js expense-intake/test/providers/shared.test.js
@@ -5109,7 +5109,7 @@ git add expense-intake/src/providers/shared.js expense-intake/test/providers/sha
 
 This is the integration task: it extracts the `fileExpense` helper (used by both the normal auto-file path and Feature 1's house-selection resolution), and wires the `awaiting_house`/`correction` checks into `processExpenseMessage`'s routing order, per the Design decisions above.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace `expense-intake/test/expense-flow.test.js` in full:
 
@@ -5717,12 +5717,12 @@ async function main() {
 await main();
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `node expense-intake/test/expense-flow.test.js`
 Expected: fails — `matchHouseFromReply` isn't imported/used by the current `expense-flow.js`, so scenarios 12-17 don't behave as asserted (e.g. no `awaiting_house` KV writes happen at all yet), and scenario 1 now needs `env.CONVERSATION_STATE` which the current `fileExpense`-less implementation never reads but the test's `baseEnv` now always provides — the failures will show up as the new scenario 12-17 assertions failing, not a crash.
 
-- [ ] **Step 3: Rewrite `src/expense-flow.js`**
+- [x] **Step 3: Rewrite `src/expense-flow.js`**
 
 Replace `expense-intake/src/expense-flow.js` in full:
 
@@ -6013,17 +6013,17 @@ export async function processExpenseMessage({ fields, photoR2Key, env, deps = {}
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `node expense-intake/test/expense-flow.test.js`
 Expected: `PASS: expense-flow.test.js`
 
-- [ ] **Step 5: Run the full suite to confirm no regressions**
+- [x] **Step 5: Run the full suite to confirm no regressions**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 6: Stage the change**
+- [x] **Step 6: Stage the change**
 
 ```bash
 git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test.js
@@ -6036,7 +6036,7 @@ git add expense-intake/src/expense-flow.js expense-intake/test/expense-flow.test
 **Files:**
 - Modify: `expense-intake/README.md`
 
-- [ ] **Step 1: Update the `## Routes` section**
+- [x] **Step 1: Update the `## Routes` section**
 
 In `expense-intake/README.md`, replace the `POST /sms` bullet under `## Routes` with:
 
@@ -6062,7 +6062,7 @@ In `expense-intake/README.md`, replace the `POST /sms` bullet under `## Routes` 
   authentication. Used by the "Photo" column link in each house's Sheet.
 ```
 
-- [ ] **Step 2: Update the `## Status` section**
+- [x] **Step 2: Update the `## Status` section**
 
 Replace the `## Status` section with:
 
@@ -6084,7 +6084,7 @@ currently need a `google_sheet_id` set via manual SQL before the pipeline
 can file to their Sheet.
 ```
 
-- [ ] **Step 3: Add a migration note to the `## D1 setup` section**
+- [x] **Step 3: Add a migration note to the `## D1 setup` section**
 
 Append to the end of the `## D1 setup (one-time, per environment)` section in `expense-intake/README.md`:
 
@@ -6099,12 +6099,12 @@ npx wrangler d1 execute expense-intake-db --local --file=migrations/0002_add_she
 ```
 ```
 
-- [ ] **Step 4: Run the full suite one more time**
+- [x] **Step 4: Run the full suite one more time**
 
 Run: `node expense-intake/test/run-all.js`
 Expected: all test files `PASS:`, then `ALL EXPENSE-INTAKE WORKER TESTS PASSED`
 
-- [ ] **Step 5: Stage the change**
+- [x] **Step 5: Stage the change**
 
 ```bash
 git add expense-intake/README.md

@@ -40,6 +40,18 @@ export const SMS_COPY_ANCHORS = {
   monthly_nudge: [
     "[X] items waiting on your OK. Text 'pending' to review.",
   ],
+  house_selection_retry: [
+    "Sorry, didn't catch that — is this for [house_list]?",
+    'Just to confirm, which one is it: [house_list]?',
+  ],
+  house_selection_giveup: [
+    'No worries — saved this one for you to sort out later.',
+    'Got it, saved for manual review — no rush.',
+  ],
+  correction_confirmed: [
+    'Updated — moved to [house]. Thanks for the heads up.',
+    'Fixed, now logged under [house].',
+  ],
 };
 
 export function buildSmsCopyPrompt(type, vars) {
@@ -109,4 +121,32 @@ export function normalizeParseExpenseResult(raw) {
     confidence: Math.min(1, Math.max(0, confidence)),
     raw_text,
   };
+}
+
+export const MATCH_HOUSE_SYSTEM_PROMPT = `You are matching a text reply from a real estate investment property client to one of their properties.
+
+Given the client's reply and a list of their properties (each with an id, address, and optional nickname), determine which property the reply refers to, if any. The reply might be a full or partial address, a nickname, a casual description, or something unrelated.
+
+Respond with ONLY a single JSON object with exactly one key, "house_id": either the numeric id of the matching property, or null if the reply does not clearly refer to any of the listed properties. No other text, markdown, or code fences.`;
+
+export function buildMatchHouseUserMessage(text, houses) {
+  const houseLines = houses.map((house) => {
+    const nicknamePart = house.nickname ? `, nickname: ${house.nickname}` : '';
+    return `- id: ${house.id}, address: ${house.address}${nicknamePart}`;
+  }).join('\n');
+  return `Client reply: "${text}"\n\nProperties:\n${houseLines}`;
+}
+
+export function normalizeMatchHouseResult(raw, houses) {
+  if (!raw || typeof raw !== 'object' || !('house_id' in raw)) {
+    throw new ProviderParseError('Model response for house matching must be a JSON object with a house_id key');
+  }
+  const { house_id } = raw;
+  if (house_id === null) {
+    return { houseId: null };
+  }
+  if (typeof house_id !== 'number' || !houses.some((house) => house.id === house_id)) {
+    throw new ProviderParseError(`house_id must be null or one of the provided house ids, got: ${house_id}`);
+  }
+  return { houseId: house_id };
 }

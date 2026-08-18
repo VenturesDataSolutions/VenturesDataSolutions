@@ -1,4 +1,4 @@
-import { PARSE_EXPENSE_SYSTEM_PROMPT, buildSmsCopyPrompt, extractJsonBlock, normalizeParseExpenseResult } from './shared.js';
+import { PARSE_EXPENSE_SYSTEM_PROMPT, buildSmsCopyPrompt, extractJsonBlock, normalizeParseExpenseResult, MATCH_HOUSE_SYSTEM_PROMPT, buildMatchHouseUserMessage, normalizeMatchHouseResult } from './shared.js';
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 const OPENROUTER_MODEL = 'anthropic/claude-sonnet-4.5';
@@ -56,4 +56,13 @@ export async function openRouterGenerateSmsCopy({ apiKey, type, vars, fetchImpl 
   ];
   const content = await openRouterChatCompletion({ apiKey, messages, temperature: 0.9, fetchImpl });
   return content.trim();
+}
+
+export async function openRouterMatchHouseFromReply({ apiKey, text, houses, fetchImpl }) {
+  const messages = [
+    { role: 'system', content: MATCH_HOUSE_SYSTEM_PROMPT },
+    { role: 'user', content: buildMatchHouseUserMessage(text, houses) },
+  ];
+  const content = await openRouterChatCompletion({ apiKey, messages, temperature: 0, fetchImpl });
+  return normalizeMatchHouseResult(extractJsonBlock(content), houses);
 }

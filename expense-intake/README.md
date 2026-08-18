@@ -13,34 +13,39 @@ implementation plan and Build Order.
 
 - `POST /sms` — Twilio inbound SMS/MMS webhook. Validates `X-Twilio-Signature`,
   stores any attached photo (resized/recompressed, only the first attached
-  photo is processed if a message has multiple) to R2, parses/categorizes
-  the expense, resolves the client and house, and either files it to that
-  house's Google Sheet + the `expenses` table (high confidence, exactly one
-  house) or holds it in `pending_review` (low confidence, or an ambiguous
-  house) — replying with the appropriate confirmation/low-confidence/
-  house-selection SMS copy either way. A repeated Twilio delivery of a
-  message already fully processed (identified by `MessageSid`) replays the
-  cached reply instead of reprocessing.
+  photo is processed if a message has multiple) to R2, then either:
+  - resolves an in-flight house-selection prompt or an open 10-minute
+    correction window for that sender phone (Build Order step 5), or
+  - parses/categorizes the expense fresh, resolves the client and house,
+    and either files it to that house's Google Sheet + the `expenses`
+    table (high confidence, exactly one house) or holds it in
+    `pending_review` (low confidence, or an ambiguous house).
+
+  Every successfully filed expense opens a 10-minute correction window
+  (a reply naming a different house moves it); an ambiguous-house write
+  opens a house-selection prompt window (a reply naming a house files it,
+  a non-matching reply gets one re-ask before falling back to permanent
+  `pending_review`). A repeated Twilio delivery of a message already fully
+  processed (identified by `MessageSid`) replays the cached reply instead
+  of reprocessing.
 - `GET /receipts/:key` — serves a stored receipt photo directly from R2, no
   authentication. Used by the "Photo" column link in each house's Sheet.
 
 ## Status
 
-Build Order steps 1-4: repo scaffolding, D1 schema, the provider
-abstraction, the Twilio inbound webhook with R2 photo storage, and the full
-happy-path pipeline — parse, categorize, file to Sheets/D1 or
-`pending_review`, and reply with confirmation copy, with dedup protection
-against Twilio's own webhook retries (a repeated delivery of a message
-already fully processed replays the cached reply instead of reprocessing).
-Not yet built: the interactive house-selection reply flow and 10-minute
-correction window (step 5 — right now, an ambiguous-house message is held
-in `pending_review` with a prompt, but a client's reply to that prompt
-isn't yet matched back to it — step 5 will reuse the same `CONVERSATION_STATE`
-KV namespace this step introduced), the `pending` retrieval command
-(step 6), Cron Triggers for the daily purge and monthly nudge (step 7),
-save-contact onboarding (step 8), and the onboarding CLI script (step 9) —
-houses currently need a `google_sheet_id` set via manual SQL before this
-pipeline can file to their Sheet.
+Build Order steps 1-5: repo scaffolding, D1 schema, the provider
+abstraction, the Twilio inbound webhook with R2 photo storage, the full
+happy-path pipeline (parse, categorize, file to Sheets/D1 or
+`pending_review`), Twilio-retry dedup protection, the interactive
+house-selection reply flow, and the 10-minute post-confirmation correction
+window. See
+`docs/superpowers/specs/2026-08-18-expense-intake-house-selection-correction-design.md`
+for the house-selection/correction design. Not yet built: the `pending`
+retrieval command for permanently-stuck ambiguous items (step 6), Cron
+Triggers for the daily purge and monthly nudge (step 7), save-contact
+onboarding (step 8), and the onboarding CLI script (step 9) — houses
+currently need a `google_sheet_id` set via manual SQL before the pipeline
+can file to their Sheet.
 
 ## Running the Worker's own tests
 
@@ -64,6 +69,14 @@ Paste the printed `database_id` into `wrangler.toml`, replacing
 ```bash
 npx wrangler d1 execute expense-intake-db --file=migrations/0001_init.sql          # remote
 npx wrangler d1 execute expense-intake-db --local --file=migrations/0001_init.sql  # local dev
+```
+
+Step 5 added a second migration for the `sheet_row` column (needed to
+delete/move a filed expense's Sheet row on a house correction):
+
+```bash
+npx wrangler d1 execute expense-intake-db --file=migrations/0002_add_sheet_row.sql          # remote
+npx wrangler d1 execute expense-intake-db --local --file=migrations/0002_add_sheet_row.sql  # local dev
 ```
 
 ## AI provider secrets (one-time, per environment)

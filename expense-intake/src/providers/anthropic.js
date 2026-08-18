@@ -1,4 +1,4 @@
-import { PARSE_EXPENSE_SYSTEM_PROMPT, buildSmsCopyPrompt, extractJsonBlock, normalizeParseExpenseResult } from './shared.js';
+import { PARSE_EXPENSE_SYSTEM_PROMPT, buildSmsCopyPrompt, extractJsonBlock, normalizeParseExpenseResult, MATCH_HOUSE_SYSTEM_PROMPT, buildMatchHouseUserMessage, normalizeMatchHouseResult } from './shared.js';
 
 const ANTHROPIC_API_BASE = 'https://api.anthropic.com/v1';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -53,4 +53,10 @@ export async function anthropicGenerateSmsCopy({ apiKey, type, vars, fetchImpl }
   const messages = [{ role: 'user', content: user }];
   const content = await anthropicMessagesRequest({ apiKey, system, messages, temperature: 0.9, fetchImpl });
   return content.trim();
+}
+
+export async function anthropicMatchHouseFromReply({ apiKey, text, houses, fetchImpl }) {
+  const messages = [{ role: 'user', content: buildMatchHouseUserMessage(text, houses) }];
+  const content = await anthropicMessagesRequest({ apiKey, system: MATCH_HOUSE_SYSTEM_PROMPT, messages, temperature: 0, fetchImpl });
+  return normalizeMatchHouseResult(extractJsonBlock(content), houses);
 }

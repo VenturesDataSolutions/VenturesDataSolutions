@@ -4,6 +4,10 @@ import {
   findHousesForClient,
   insertExpense,
   insertPendingReview,
+  findPendingReviewById,
+  deletePendingReview,
+  findExpenseById,
+  updateExpenseHouse,
 } from '../src/db.js';
 import { createFakeD1 } from './fake-d1.js';
 
@@ -47,23 +51,24 @@ async function main() {
   const noHouses = await findHousesForClient(db5, 999);
   assert(Array.isArray(noHouses) && noHouses.length === 0, 'findHousesForClient must return an empty array when the client has no houses');
 
-  // insertExpense
+  // insertExpense: now binds 11 params (adds sheet_row) and returns the new row's id
   const db6 = createFakeD1();
-  await insertExpense(db6, {
+  const newExpenseId = await insertExpense(db6, {
     houseId: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials',
-    confidence: 0.9, photoR2Key: 'receipts/x/1.jpg', rawText: 'HD $42.50', loggedByPhone: '+15551234567', notes: '',
+    confidence: 0.9, photoR2Key: 'receipts/x/1.jpg', rawText: 'HD $42.50', loggedByPhone: '+15551234567', notes: '', sheetRow: 5,
   });
   const insertCall = db6.calls[0];
   assert(insertCall.sql.includes('INSERT INTO expenses'), 'insertExpense must INSERT into the expenses table');
   assert(insertCall.params[0] === 10 && insertCall.params[1] === '2026-08-17' && insertCall.params[4] === 'Materials', 'must bind house_id, date, and category in the expected column order');
   assert(
     JSON.stringify(insertCall.params) === JSON.stringify([
-      10, '2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, 'receipts/x/1.jpg', 'HD $42.50', '+15551234567', '',
+      10, '2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, 'receipts/x/1.jpg', 'HD $42.50', '+15551234567', '', 5,
     ]),
-    'insertExpense must bind all 10 params (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, notes) in exact column order'
+    'insertExpense must bind all 11 params (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, notes, sheet_row) in exact column order'
   );
+  assert(newExpenseId === 1, "insertExpense must return the new row's id from result.meta.last_row_id");
 
-  // insertExpense: notes defaults to empty string when omitted
+  // insertExpense: notes defaults to empty string and sheet_row defaults to null when omitted
   const db7 = createFakeD1();
   await insertExpense(db7, {
     houseId: 10, date: '2026-08-17', vendor: null, amount: null, category: 'Other',
@@ -72,14 +77,14 @@ async function main() {
   assert(db7.calls[0].params[9] === '', 'insertExpense must default a missing notes value to an empty string, not undefined');
   assert(
     JSON.stringify(db7.calls[0].params) === JSON.stringify([
-      10, '2026-08-17', null, null, 'Other', 0.2, null, '', '+15551234567', '',
+      10, '2026-08-17', null, null, 'Other', 0.2, null, '', '+15551234567', '', null,
     ]),
-    'insertExpense must bind all 10 params correctly even when vendor/amount/photoR2Key are null and notes is omitted'
+    'insertExpense must bind all 11 params correctly even when vendor/amount/photoR2Key/sheet_row are null and notes is omitted'
   );
 
-  // insertPendingReview
+  // insertPendingReview: now returns the new row's id
   const db8 = createFakeD1();
-  await insertPendingReview(db8, {
+  const newPendingId = await insertPendingReview(db8, {
     clientId: 1, houseId: null, amountGuess: null, categoryGuess: null,
     photoR2Key: 'receipts/x/2.jpg', rawText: 'unclear', confidence: 0, expiresAt: '2026-10-16T00:00:00.000Z',
   });
@@ -91,6 +96,36 @@ async function main() {
       1, null, null, null, 'receipts/x/2.jpg', 'unclear', 0, '2026-10-16T00:00:00.000Z',
     ]),
     'insertPendingReview must bind all 8 params (client_id, house_id, amount_guess, category_guess, photo_r2_key, raw_text, confidence, expires_at) in exact column order'
+  );
+  assert(newPendingId === 1, "insertPendingReview must return the new row's id from result.meta.last_row_id");
+
+  // findPendingReviewById
+  const pendingRow = { id: 99, client_id: 1, house_id: null, amount_guess: 10, category_guess: 'Materials', photo_r2_key: null, raw_text: 'Lowes $10', confidence: 0.95 };
+  const db9 = createFakeD1({ 'SELECT * FROM pending_review WHERE id = ?': pendingRow });
+  const foundPending = await findPendingReviewById(db9, 99);
+  assert(foundPending === pendingRow, 'findPendingReviewById must return the row from the fake DB');
+  assert(db9.calls[0].params[0] === 99, 'must bind the pending_review id as the query parameter');
+
+  // deletePendingReview
+  const db10 = createFakeD1();
+  await deletePendingReview(db10, 99);
+  assert(db10.calls[0].sql.includes('DELETE FROM pending_review'), 'deletePendingReview must DELETE from the pending_review table');
+  assert(db10.calls[0].params[0] === 99, 'must bind the pending_review id to delete');
+
+  // findExpenseById
+  const expenseRow = { id: 42, house_id: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, photo_r2_key: 'receipts/x/1.jpg', raw_text: 'HD $42.50', logged_by_phone: '+15551234567', notes: '', sheet_row: 5 };
+  const db11 = createFakeD1({ 'SELECT * FROM expenses WHERE id = ?': expenseRow });
+  const foundExpense = await findExpenseById(db11, 42);
+  assert(foundExpense === expenseRow, 'findExpenseById must return the row from the fake DB');
+  assert(db11.calls[0].params[0] === 42, 'must bind the expense id as the query parameter');
+
+  // updateExpenseHouse
+  const db12 = createFakeD1();
+  await updateExpenseHouse(db12, { expenseId: 42, houseId: 11, sheetRow: 8 });
+  assert(db12.calls[0].sql.includes('UPDATE expenses SET house_id'), "updateExpenseHouse must UPDATE the expenses table's house_id (and sheet_row)");
+  assert(
+    JSON.stringify(db12.calls[0].params) === JSON.stringify([11, 8, 42]),
+    'updateExpenseHouse must bind house_id, sheet_row, then the expense id (matching the SET ... WHERE id = ? clause order)'
   );
 
   console.log('PASS: db.test.js');

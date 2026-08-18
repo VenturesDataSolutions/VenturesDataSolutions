@@ -1,5 +1,5 @@
 // expense-intake/test/providers/index.test.js
-import { parseExpense, generateSmsCopy } from '../../src/providers/index.js';
+import { parseExpense, generateSmsCopy, matchHouseFromReply } from '../../src/providers/index.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -62,6 +62,23 @@ async function main() {
   }, { fetchImpl: smsFetch });
   assert(sms === 'Saved under Materials for 123 Main St.', 'generateSmsCopy must return the adapter output');
   assert(smsFetch.calls[0].url === 'https://api.anthropic.com/v1/messages', 'generateSmsCopy must route through the same AI_PROVIDER dispatch as parseExpense');
+
+  // matchHouseFromReply routes the same way (default -> OpenRouter)
+  const matchHouses = [{ id: 10, address: '123 Main St', nickname: 'Main St' }];
+  const matchDefaultFetch = fakeFetch({ choices: [{ message: { content: '{"house_id":10}' } }] });
+  const matchDefault = await matchHouseFromReply({ text: 'the main st one', houses: matchHouses }, {
+    OPENROUTER_API_KEY: 'or_key', ANTHROPIC_API_KEY: 'ant_key',
+  }, { fetchImpl: matchDefaultFetch });
+  assert(matchDefaultFetch.calls[0].url === 'https://openrouter.ai/api/v1/chat/completions', 'unset AI_PROVIDER must default matchHouseFromReply to OpenRouter');
+  assert(matchDefault.houseId === 10, 'matchHouseFromReply must return the normalized result regardless of provider');
+
+  // matchHouseFromReply routes to Anthropic when AI_PROVIDER=anthropic
+  const matchAntFetch = fakeFetch({ content: [{ type: 'text', text: '{"house_id":null}' }] });
+  const matchAnt = await matchHouseFromReply({ text: 'huh?', houses: matchHouses }, {
+    AI_PROVIDER: 'anthropic', OPENROUTER_API_KEY: 'or_key', ANTHROPIC_API_KEY: 'ant_key',
+  }, { fetchImpl: matchAntFetch });
+  assert(matchAntFetch.calls[0].url === 'https://api.anthropic.com/v1/messages', 'AI_PROVIDER=anthropic must route matchHouseFromReply to the Anthropic direct adapter');
+  assert(matchAnt.houseId === null, 'matchHouseFromReply must return houseId: null on no match regardless of provider');
 
   console.log('PASS: providers/index.test.js');
 }

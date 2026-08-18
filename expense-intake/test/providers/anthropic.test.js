@@ -1,4 +1,4 @@
-import { anthropicParseExpense, anthropicGenerateSmsCopy } from '../../src/providers/anthropic.js';
+import { anthropicParseExpense, anthropicGenerateSmsCopy, anthropicMatchHouseFromReply } from '../../src/providers/anthropic.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -68,6 +68,26 @@ async function main() {
   assert(sms === '$42.50 recorded under Materials for 123 Main St. 10-minute window if this needs a fix.', 'generateSmsCopy must return the trimmed model output');
   const smsBody = JSON.parse(smsFetch.calls[0].init.body);
   assert(smsBody.temperature > 0.5, 'SMS copy generation must use a nonzero temperature for wording variation');
+
+  // matchHouseFromReply: a confident match
+  const matchHouses = [
+    { id: 10, address: '123 Main St', nickname: 'Main St' },
+    { id: 11, address: '456 Oak Ave', nickname: null },
+  ];
+  const matchFetch = fakeFetch(messagesResponse('{"house_id":10}'));
+  const matchResult = await anthropicMatchHouseFromReply({ apiKey: 'sk-ant-key', text: 'the main st one', houses: matchHouses, fetchImpl: matchFetch });
+  assert(matchResult.houseId === 10, 'anthropicMatchHouseFromReply must return the normalized matched house id');
+  const matchCall = matchFetch.calls[0];
+  assert(matchCall.url === 'https://api.anthropic.com/v1/messages', 'must hit the Anthropic native Messages endpoint');
+  const matchBody = JSON.parse(matchCall.init.body);
+  assert(matchBody.system.includes('matching a text reply'), 'system field must carry the match-house system prompt');
+  assert(matchBody.messages[0].content.includes('the main st one'), 'user message must carry the reply text');
+  assert(matchBody.temperature === 0, 'house matching must use temperature 0, same as parseExpense, for deterministic matching');
+
+  // matchHouseFromReply: no confident match
+  const noMatchFetch = fakeFetch(messagesResponse('{"house_id":null}'));
+  const noMatchResult = await anthropicMatchHouseFromReply({ apiKey: 'sk-ant-key', text: 'what?', houses: matchHouses, fetchImpl: noMatchFetch });
+  assert(noMatchResult.houseId === null, 'anthropicMatchHouseFromReply must return houseId: null on no confident match');
 
   console.log('PASS: providers/anthropic.test.js');
 }

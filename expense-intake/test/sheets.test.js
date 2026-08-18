@@ -1,5 +1,5 @@
 // expense-intake/test/sheets.test.js
-import { appendExpenseRow } from '../src/sheets.js';
+import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow } from '../src/sheets.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -41,6 +41,44 @@ async function main() {
     assert(err.message === 'The caller does not have permission', 'must surface the Sheets API error message');
   }
   assert(threw, 'a non-2xx Sheets API response must throw');
+
+  // extractAppendedRowNumber: parses the row number out of a real append response shape
+  const rowNumber = extractAppendedRowNumber({ spreadsheetId: 'sheet123', updates: { updatedRange: 'Sheet1!A5:I5', updatedRows: 1 } });
+  assert(rowNumber === 5, 'extractAppendedRowNumber must parse the row number out of updatedRange');
+
+  // extractAppendedRowNumber: a multi-row append parses the starting row
+  const multiRowNumber = extractAppendedRowNumber({ updates: { updatedRange: 'Sheet1!A12:I14' } });
+  assert(multiRowNumber === 12, 'extractAppendedRowNumber must parse the starting row number for a multi-row range');
+
+  // extractAppendedRowNumber: missing updates.updatedRange throws
+  let threwMissingRange = false;
+  try {
+    extractAppendedRowNumber({ spreadsheetId: 'sheet123' });
+  } catch { threwMissingRange = true; }
+  assert(threwMissingRange, 'extractAppendedRowNumber must throw when updates.updatedRange is missing');
+
+  // deleteSheetRow
+  const deleteFetch = fakeFetch(true, 200, { spreadsheetId: 'sheet123', replies: [{}] });
+  await deleteSheetRow({ accessToken: 'ya29.token', spreadsheetId: 'sheet123', sheetRow: 5, fetchImpl: deleteFetch });
+  const deleteCall = deleteFetch.calls[0];
+  assert(deleteCall.url === 'https://sheets.googleapis.com/v4/spreadsheets/sheet123:batchUpdate', 'deleteSheetRow must hit the batchUpdate endpoint for the given spreadsheetId');
+  assert(deleteCall.init.headers.Authorization === 'Bearer ya29.token', 'deleteSheetRow must send the access token as a Bearer token');
+  const deleteBody = JSON.parse(deleteCall.init.body);
+  const deleteDimension = deleteBody.requests[0].deleteDimension;
+  assert(deleteDimension.range.sheetId === 0, 'deleteSheetRow must target the standard Sheet1 tab (gid 0)');
+  assert(deleteDimension.range.dimension === 'ROWS', 'deleteSheetRow must delete a row dimension, not columns');
+  assert(deleteDimension.range.startIndex === 4 && deleteDimension.range.endIndex === 5, 'deleteSheetRow must convert the 1-indexed sheetRow (5) to the 0-indexed, exclusive-end startIndex/endIndex (4, 5) the batchUpdate API expects');
+
+  // deleteSheetRow: error path
+  const deleteFailFetch = fakeFetch(false, 403, { error: { message: 'The caller does not have permission' } });
+  let threwDeleteError = false;
+  try {
+    await deleteSheetRow({ accessToken: 'bad', spreadsheetId: 'sheet123', sheetRow: 5, fetchImpl: deleteFailFetch });
+  } catch (err) {
+    threwDeleteError = true;
+    assert(err.message === 'The caller does not have permission', 'deleteSheetRow must surface the Sheets API error message');
+  }
+  assert(threwDeleteError, 'a non-2xx batchUpdate response must throw');
 
   console.log('PASS: sheets.test.js');
 }
