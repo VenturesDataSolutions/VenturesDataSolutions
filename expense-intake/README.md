@@ -66,26 +66,35 @@ full history and design rationale of each step.
 
 ## Onboarding a new client
 
-Once a Twilio number has been purchased for the client (still a manual
-step — see "Twilio secrets" below), everything else is one command:
+**For each house, first create its Google Sheet by hand** (in a real
+Google account — a personal Gmail account works fine) and share it with
+the service account's `client_email` (from your
+`GOOGLE_SERVICE_ACCOUNT_JSON`) as **Editor**. This step can't be
+automated: a plain (non-Workspace) service account has no Drive storage
+quota of its own and cannot create new files — confirmed against the
+real API. Grab each new spreadsheet's ID from its URL (the segment
+between `/d/` and `/edit`).
+
+Once a Twilio number has also been purchased for the client (still a
+manual step — see "Twilio secrets" below) and you have each house's
+spreadsheet ID, everything else is one command:
 
 ```bash
 node scripts/onboard-client.js path/to/client-config.json path/to/service-account.json
 ```
 
-The config file lists the client's business name, email (used only to
-share each house's Sheet as Viewer — never stored in D1), accounting
-software, Twilio number, and its houses/authorized senders:
+The config file lists the client's business name, accounting software,
+Twilio number, and its houses (each with the spreadsheet ID from the
+step above) and authorized senders:
 
 ```json
 {
   "businessName": "Acme Rentals",
-  "email": "owner@acme-rentals.com",
   "accountingSoftware": "quickbooks_online",
   "twilioNumber": "+15559876543",
   "carePlanTier": "standard",
   "houses": [
-    { "address": "123 Main St", "nickname": "Main St" }
+    { "address": "123 Main St", "nickname": "Main St", "googleSheetId": "1AbC...xyz" }
   ],
   "authorizedSenders": [
     { "phoneNumber": "+15551234567", "label": "Owner" }
@@ -94,15 +103,18 @@ software, Twilio number, and its houses/authorized senders:
 ```
 
 `accountingSoftware` must be one of `quickbooks_online`,
-`quickbooks_desktop`, `wave`, `xero`, `csv`. The script creates each
-house's Google Sheet (with the correct header row) and shares it with
-`email` as a Viewer, then writes the `clients`/`houses`/
-`authorized_senders` rows to D1 via `wrangler d1 execute`. Pass
-`--local` to target the local D1 emulation for a dry run instead of the
-real remote database — there's no local emulation for Sheets/Drive, so
-even a `--local` dry run creates real Google Sheets. See
+`quickbooks_desktop`, `wave`, `xero`, `csv`. The script writes the
+correct header row into each house's already-shared Sheet, then writes
+the `clients`/`houses`/`authorized_senders` rows to D1 via
+`wrangler d1 execute`. Pass `--local` to target the local D1 emulation
+for a dry run instead of the real remote database — the Sheets-writing
+step still hits the real API either way, since there's no local
+emulation for it. See
 `docs/superpowers/specs/2026-08-18-expense-intake-onboarding-cli-design.md`
-for the full design.
+for the full design (note: that spec's original "auto-create and share
+the Sheet" approach turned out not to be possible for a non-Workspace
+service account — the design decisions above reflect what was actually
+built after that was discovered).
 
 After onboarding, point the client's Twilio number's messaging webhook
 at this Worker's `/sms` route (see "Twilio secrets" below) — that step
