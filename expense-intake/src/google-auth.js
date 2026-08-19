@@ -1,7 +1,6 @@
 // expense-intake/src/google-auth.js
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-export const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
-export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file'; // least-privilege Drive scope — Step 9's onboarding script only ever shares files the service account itself created
+const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 
 function base64UrlEncode(bytes) {
   const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -44,13 +43,13 @@ async function signJwt(claimSet, privateKeyPem) {
   return `${signingInput}.${encodedSignature}`;
 }
 
-export async function getGoogleAccessToken({ serviceAccountJson, fetchImpl, now, scope }) {
+export async function getGoogleAccessToken({ serviceAccountJson, fetchImpl, now }) {
   const account = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson;
   const getNow = now || Date.now;
   const nowSeconds = Math.floor(getNow() / 1000);
   const claimSet = {
     iss: account.client_email,
-    scope: scope || SHEETS_SCOPE,
+    scope: SHEETS_SCOPE,
     aud: TOKEN_URL,
     iat: nowSeconds,
     exp: nowSeconds + 3600,

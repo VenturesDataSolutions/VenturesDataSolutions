@@ -1,6 +1,6 @@
 // expense-intake/test/onboarding.test.js
 import crypto from 'node:crypto';
-import { validateConfig, buildOnboardingSql, createHouseSheets, onboardClient } from '../src/onboarding.js';
+import { validateConfig, buildOnboardingSql, prepareHouseSheets, onboardClient } from '../src/onboarding.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -29,13 +29,7 @@ function fakeFetch(handlers) {
 function googleApiFetchHandlers() {
   return [
     ['oauth2.googleapis.com', async () => ({ ok: true, status: 200, json: async () => ({ access_token: 'ya29.tok' }) })],
-    ['sheets.googleapis.com/v4/spreadsheets', async (url, init) => {
-      if (init.method === 'POST' && !url.includes('/values/')) {
-        return { ok: true, status: 200, json: async () => ({ spreadsheetId: 'new_sheet_1' }) };
-      }
-      return { ok: true, status: 200, json: async () => ({ updatedRange: 'Sheet1!A1:I1' }) };
-    }],
-    ['drive/v3/files', async () => ({ ok: true, status: 200, json: async () => ({ id: 'perm1' }) })],
+    ['sheets.googleapis.com/v4/spreadsheets', async () => ({ ok: true, status: 200, json: async () => ({ updatedRange: 'Sheet1!A1:I1' }) })],
   ];
 }
 
@@ -43,9 +37,9 @@ async function main() {
   // validateConfig: a fully valid config must not throw
   {
     const validConfig = {
-      businessName: 'Acme Rentals', email: 'owner@acme-rentals.com', twilioNumber: '+15559876543',
+      businessName: 'Acme Rentals', twilioNumber: '+15559876543',
       accountingSoftware: 'quickbooks_online',
-      houses: [{ address: '123 Main St', nickname: null }],
+      houses: [{ address: '123 Main St', nickname: null, googleSheetId: 'sheet_abc' }],
       authorizedSenders: [{ phoneNumber: '+15551234567', label: null }],
     };
     let threwValid = false;
@@ -66,6 +60,23 @@ async function main() {
       assert(err.message.includes('authorizedSenders'), 'must report an empty authorizedSenders array');
     }
     assert(threwInvalid, 'an invalid config must throw before any side effect is attempted');
+  }
+
+  // validateConfig: a house missing googleSheetId is reported (Sheets are created by hand,
+  // not auto-created — a bare service account has no Drive storage quota of its own)
+  {
+    let threwMissingSheetId = false;
+    try {
+      validateConfig({
+        businessName: 'Acme Rentals', twilioNumber: '+15559876543', accountingSoftware: 'quickbooks_online',
+        houses: [{ address: '123 Main St', nickname: null }],
+        authorizedSenders: [{ phoneNumber: '+15551234567', label: null }],
+      });
+    } catch (err) {
+      threwMissingSheetId = true;
+      assert(err.message.includes('houses[0].googleSheetId'), 'must report which house is missing a googleSheetId');
+    }
+    assert(threwMissingSheetId, 'a house with no googleSheetId must throw');
   }
 
   // buildOnboardingSql
@@ -91,44 +102,42 @@ async function main() {
     assert((sql.match(/INSERT INTO houses/g) || []).length === 2, 'must include one houses INSERT per house');
     assert(sql.includes("(SELECT id FROM clients WHERE twilio_number = '+15559876543')"), 'houses/authorized_senders INSERTs must resolve client_id via a twilio_number subquery, not a captured last_row_id');
     assert(sql.includes("456 O''Hare Ave"), "must escape single quotes in a house's address too");
-    assert(sql.includes("'sheet_abc'") && sql.includes("'sheet_def'"), "must interpolate each house's created googleSheetId");
+    assert(sql.includes("'sheet_abc'") && sql.includes("'sheet_def'"), "must interpolate each house's googleSheetId");
     assert((sql.match(/INSERT INTO authorized_senders/g) || []).length === 2, 'must include one authorized_senders INSERT per sender');
     assert(sql.includes('NULL'), 'a null nickname/label must be written as SQL NULL, not the string "null"');
   }
 
-  // createHouseSheets
+  // prepareHouseSheets: writes the header row into each house's already-created,
+  // already-shared Sheet (no create/share calls — those aren't possible for a bare
+  // service account, confirmed against the real API)
   {
     const config = {
       businessName: 'Acme Rentals',
-      email: 'owner@acme-rentals.com',
-      houses: [{ address: '123 Main St', nickname: 'Main St' }],
+      houses: [{ address: '123 Main St', nickname: 'Main St', googleSheetId: 'sheet_abc' }],
     };
     const fetchImpl = fakeFetch(googleApiFetchHandlers());
-    const result = await createHouseSheets(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl });
-    assert(result.length === 1 && result[0].googleSheetId === 'new_sheet_1', 'createHouseSheets must attach the newly created spreadsheetId to each house');
-    const shareCall = fetchImpl.calls.find((c) => c.url.includes('/permissions'));
-    assert(shareCall, 'createHouseSheets must share the new spreadsheet');
-    const shareBody = JSON.parse(shareCall.init.body);
-    assert(shareBody.emailAddress === 'owner@acme-rentals.com', 'createHouseSheets must share with the configured email');
+    const result = await prepareHouseSheets(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl });
+    assert(result === config.houses, 'prepareHouseSheets must return the houses as-is (they already carry their googleSheetId)');
+    const headerCall = fetchImpl.calls.find((c) => c.url.includes('/sheet_abc/values/'));
+    assert(headerCall, 'prepareHouseSheets must write the header row into the given googleSheetId');
   }
 
-  // onboardClient ties createHouseSheets + buildOnboardingSql + runWrangler together
+  // onboardClient ties prepareHouseSheets + buildOnboardingSql + runWrangler together
   {
     const config = {
       businessName: 'Acme Rentals',
-      email: 'owner@acme-rentals.com',
       carePlanTier: null,
       twilioNumber: '+15559876543',
       accountingSoftware: 'quickbooks_online',
-      houses: [{ address: '123 Main St', nickname: 'Main St' }],
+      houses: [{ address: '123 Main St', nickname: 'Main St', googleSheetId: 'sheet_abc' }],
       authorizedSenders: [{ phoneNumber: '+15551234567', label: 'Owner' }],
     };
     const fetchImpl = fakeFetch(googleApiFetchHandlers());
     let ranSql = null;
     const runWrangler = async (sql) => { ranSql = sql; };
     const result = await onboardClient(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl, runWrangler });
-    assert(result.housesWithSheets[0].googleSheetId === 'new_sheet_1', 'onboardClient must return the houses with their created googleSheetId');
-    assert(ranSql && ranSql.includes('new_sheet_1'), 'onboardClient must pass SQL referencing the newly created sheet id to runWrangler');
+    assert(result.housesWithSheets[0].googleSheetId === 'sheet_abc', 'onboardClient must return the houses (with their googleSheetId)');
+    assert(ranSql && ranSql.includes('sheet_abc'), 'onboardClient must pass SQL referencing the house sheet id to runWrangler');
     assert(ranSql.includes('INSERT INTO clients') && ranSql.includes('INSERT INTO authorized_senders'), 'onboardClient must run the full onboarding SQL, not just the houses portion');
   }
 

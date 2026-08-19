@@ -2,7 +2,6 @@
 const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
 const APPEND_RANGE = 'Sheet1!A:I'; // fixed tab/column layout — onboarding (not yet built) is expected to create every house's Sheet with this same structure, per Step 4's design note
 const DEFAULT_SHEET_ID = 0; // gid of the standard "Sheet1" tab every house's spreadsheet is assumed to use — see Step 5's design spec
-const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 const HEADER_ROW = ['Date', 'Vendor', 'Amount', 'Category', 'Confidence', 'Photo', 'Raw Text', 'Logged By', 'Notes'];
 
 export async function appendExpenseRow({ accessToken, spreadsheetId, row, fetchImpl }) {
@@ -65,24 +64,6 @@ export async function deleteSheetRow({ accessToken, spreadsheetId, sheetRow, fet
   return data;
 }
 
-export async function createSpreadsheet({ accessToken, title, fetchImpl }) {
-  const doFetch = fetchImpl || fetch;
-  const response = await doFetch(SHEETS_API_BASE, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ properties: { title }, sheets: [{ properties: { title: 'Sheet1' } }] }),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    const message = (data && data.error && data.error.message) || `Sheets API request failed with status ${response.status}`;
-    throw new Error(message);
-  }
-  return data.spreadsheetId;
-}
-
 export async function writeHeaderRow({ accessToken, spreadsheetId, fetchImpl }) {
   const doFetch = fetchImpl || fetch;
   const range = encodeURIComponent('Sheet1!A1:I1');
@@ -98,25 +79,6 @@ export async function writeHeaderRow({ accessToken, spreadsheetId, fetchImpl }) 
   const data = await response.json();
   if (!response.ok) {
     const message = (data && data.error && data.error.message) || `Sheets API request failed with status ${response.status}`;
-    throw new Error(message);
-  }
-  return data;
-}
-
-export async function shareSpreadsheetWithEmail({ accessToken, spreadsheetId, email, fetchImpl }) {
-  const doFetch = fetchImpl || fetch;
-  const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(spreadsheetId)}/permissions`;
-  const response = await doFetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ role: 'reader', type: 'user', emailAddress: email }),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    const message = (data && data.error && data.error.message) || `Drive API request failed with status ${response.status}`;
     throw new Error(message);
   }
   return data;

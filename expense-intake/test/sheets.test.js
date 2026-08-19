@@ -1,5 +1,5 @@
 // expense-intake/test/sheets.test.js
-import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow, createSpreadsheet, writeHeaderRow, shareSpreadsheetWithEmail } from '../src/sheets.js';
+import { appendExpenseRow, extractAppendedRowNumber, deleteSheetRow, writeHeaderRow } from '../src/sheets.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -80,27 +80,6 @@ async function main() {
   }
   assert(threwDeleteError, 'a non-2xx batchUpdate response must throw');
 
-  // createSpreadsheet
-  const createFetch = fakeFetch(true, 200, { spreadsheetId: 'new_sheet_123' });
-  const spreadsheetId = await createSpreadsheet({ accessToken: 'ya29.token', title: 'Acme Rentals — Main St', fetchImpl: createFetch });
-  assert(spreadsheetId === 'new_sheet_123', 'createSpreadsheet must return the new spreadsheetId');
-  const createCall = createFetch.calls[0];
-  assert(createCall.url === 'https://sheets.googleapis.com/v4/spreadsheets', 'createSpreadsheet must POST to the Sheets API base to create a new spreadsheet');
-  const createBody = JSON.parse(createCall.init.body);
-  assert(createBody.properties.title === 'Acme Rentals — Main St', 'createSpreadsheet must set the spreadsheet title');
-  assert(createBody.sheets[0].properties.title === 'Sheet1', 'createSpreadsheet must name the first tab Sheet1, matching the fixed range every append/delete call already assumes');
-
-  // createSpreadsheet: error path
-  const createFailFetch = fakeFetch(false, 403, { error: { message: 'insufficient permission' } });
-  let threwCreate = false;
-  try {
-    await createSpreadsheet({ accessToken: 'bad', title: 'x', fetchImpl: createFailFetch });
-  } catch (err) {
-    threwCreate = true;
-    assert(err.message === 'insufficient permission', 'createSpreadsheet must surface the Sheets API error message');
-  }
-  assert(threwCreate, 'a non-2xx create response must throw');
-
   // writeHeaderRow
   const headerFetch = fakeFetch(true, 200, { updatedRange: 'Sheet1!A1:I1' });
   await writeHeaderRow({ accessToken: 'ya29.token', spreadsheetId: 'new_sheet_123', fetchImpl: headerFetch });
@@ -112,25 +91,6 @@ async function main() {
     JSON.stringify(headerBody.values[0]) === JSON.stringify(['Date', 'Vendor', 'Amount', 'Category', 'Confidence', 'Photo', 'Raw Text', 'Logged By', 'Notes']),
     "writeHeaderRow must write the exact 9 column headers, matching fileExpense's append column order"
   );
-
-  // shareSpreadsheetWithEmail
-  const shareFetch = fakeFetch(true, 200, { id: 'permission123' });
-  await shareSpreadsheetWithEmail({ accessToken: 'ya29.token', spreadsheetId: 'new_sheet_123', email: 'owner@acme-rentals.com', fetchImpl: shareFetch });
-  const shareCall = shareFetch.calls[0];
-  assert(shareCall.url === 'https://www.googleapis.com/drive/v3/files/new_sheet_123/permissions', 'shareSpreadsheetWithEmail must POST to the Drive API permissions endpoint for the given spreadsheetId');
-  const shareBody = JSON.parse(shareCall.init.body);
-  assert(shareBody.role === 'reader' && shareBody.type === 'user' && shareBody.emailAddress === 'owner@acme-rentals.com', 'shareSpreadsheetWithEmail must share as a reader (Viewer) with the given email');
-
-  // shareSpreadsheetWithEmail: error path
-  const shareFailFetch = fakeFetch(false, 400, { error: { message: 'Invalid sharing request' } });
-  let threwShare = false;
-  try {
-    await shareSpreadsheetWithEmail({ accessToken: 'bad', spreadsheetId: 'new_sheet_123', email: 'bad-email', fetchImpl: shareFailFetch });
-  } catch (err) {
-    threwShare = true;
-    assert(err.message === 'Invalid sharing request', 'shareSpreadsheetWithEmail must surface the Drive API error message');
-  }
-  assert(threwShare, 'a non-2xx share response must throw');
 
   console.log('PASS: sheets.test.js');
 }

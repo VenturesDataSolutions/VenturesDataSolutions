@@ -14,8 +14,12 @@ function runWranglerWithSql(sql, { local }) {
   const tmpFile = path.join(os.tmpdir(), `onboard-client-${Date.now()}.sql`);
   fs.writeFileSync(tmpFile, sql, 'utf8');
   try {
-    const args = ['wrangler', 'd1', 'execute', D1_DATABASE_NAME, local ? '--local' : '--remote', `--file=${tmpFile}`];
-    execFileSync('npx', args, { stdio: 'inherit', cwd: PROJECT_ROOT });
+    // shell: true is required on Windows to resolve npx.cmd (execFileSync('npx', ...)
+    // without it fails with ENOENT, since Windows won't spawn a .cmd shim directly without
+    // going through a shell). Arguments aren't auto-escaped under shell: true, so the file
+    // path is quoted explicitly in case a temp directory ever contains a space.
+    const args = ['wrangler', 'd1', 'execute', D1_DATABASE_NAME, local ? '--local' : '--remote', `--file="${tmpFile}"`];
+    execFileSync('npx', args, { stdio: 'inherit', cwd: PROJECT_ROOT, shell: true });
   } finally {
     fs.unlinkSync(tmpFile);
   }

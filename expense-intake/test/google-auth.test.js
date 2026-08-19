@@ -1,6 +1,6 @@
 // expense-intake/test/google-auth.test.js
 import crypto from 'node:crypto';
-import { getGoogleAccessToken, SHEETS_SCOPE, DRIVE_FILE_SCOPE } from '../src/google-auth.js';
+import { getGoogleAccessToken } from '../src/google-auth.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -91,18 +91,6 @@ async function main() {
   const stringFetch = fakeFetch(true, 200, { access_token: 'ya29.from_string', token_type: 'Bearer', expires_in: 3600 });
   const tokenFromString = await getGoogleAccessToken({ serviceAccountJson: JSON.stringify(serviceAccount), fetchImpl: stringFetch });
   assert(tokenFromString === 'ya29.from_string', 'must accept serviceAccountJson as a raw JSON string (as stored in a Worker secret)');
-
-  // an explicit scope param overrides the default SHEETS_SCOPE (used by the onboarding
-  // script, which additionally needs Drive access to share a newly created Sheet)
-  const scopeFetch = fakeFetch(true, 200, { access_token: 'ya29.scoped_token', token_type: 'Bearer', expires_in: 3600 });
-  await getGoogleAccessToken({
-    serviceAccountJson: serviceAccount, fetchImpl: scopeFetch,
-    scope: `${SHEETS_SCOPE} ${DRIVE_FILE_SCOPE}`,
-  });
-  const scopeJwt = new URLSearchParams(scopeFetch.calls[0].init.body).get('assertion');
-  const [, encodedScopeClaimSet] = scopeJwt.split('.');
-  const scopeClaimSet = JSON.parse(base64UrlDecode(encodedScopeClaimSet).toString('utf8'));
-  assert(scopeClaimSet.scope === 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file', 'a provided scope must override the default and support space-joined multiple scopes');
 
   console.log('PASS: google-auth.test.js');
 }
