@@ -258,6 +258,11 @@ a { color: inherit; }
   text-align: center;
 }
 
+/* Full-caps legal text (Terms sections 8-9): keep same size/weight as body copy, just add letter-spacing for legibility */
+.legal-caps {
+  letter-spacing: 0.02em;
+}
+
 /* Footer */
 .site-footer { background: var(--forest-dark); color: var(--cream); margin-top: 64px; }
 .footer-inner { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; padding: 40px 24px; }
