@@ -60,11 +60,17 @@ export const SMS_COPY_ANCHORS = {
     "You're all caught up — no pending items to review.",
     'Nothing pending right now — all clear.',
   ],
-  contact_card_intro: [
-    "Save this number for [business]'s expense tracker — text a receipt anytime.",
-    "This is [business]'s expense line — save the contact so texts are easy to spot.",
-  ],
 };
+
+// The contact-card intro is NOT run through buildSmsCopyPrompt/the AI copy-generation
+// pipeline like the anchors above — that pipeline explicitly instructs the model to vary its
+// wording and never copy an anchor verbatim (see buildSmsCopyPrompt below), which can't
+// reliably guarantee the CTIA/A2P 10DLC-required disclosures (brand, frequency, rates,
+// HELP/STOP) survive into every generated message. This message carries those required
+// disclosures, so it's a fixed, deterministic template instead.
+export function buildContactCardIntroSms({ business }) {
+  return `VDS Expense Tracker: You're opted in for ${business}'s receipt/expense texts. Msg frequency varies. Msg&data rates may apply. Reply HELP for help, STOP to cancel.`;
+}
 
 export function buildSmsCopyPrompt(type, vars) {
   const anchors = SMS_COPY_ANCHORS[type];

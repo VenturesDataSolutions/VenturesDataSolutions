@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { handleSmsWebhook, handleGetReceipt, handleGetContactCard } from '../src/handlers.js';
+import { handleSmsWebhook, handleGetReceipt, handleGetContactCard, handleGetConsentForm, handlePostConsent } from '../src/handlers.js';
 import { createFakeImagesBinding } from './fake-images.js';
 import { createFakeR2Bucket } from './fake-r2.js';
 import { createFakeD1 } from './fake-d1.js';
@@ -199,6 +199,44 @@ async function main() {
     const db = createFakeD1();
     const bad = await handleGetContactCard({ clientId: 'not-a-number', db });
     assert(bad.status === 404, 'a non-numeric clientId must 404 rather than attempting a query');
+  }
+
+  // handleGetConsentForm
+  {
+    const result = handleGetConsentForm();
+    assert(result.status === 200 && result.contentType === 'text/html', 'handleGetConsentForm must serve an HTML page');
+    assert(result.body.includes('Reply HELP for help, STOP to cancel'), 'the served form must include the exact required HELP/STOP language');
+  }
+
+  // handlePostConsent: valid phone + checked box -> 200, inserts a consent row with the exact consent text
+  {
+    const db = createFakeD1();
+    const bodyText = new URLSearchParams({ phone: '(555) 123-4567', consent: 'yes' }).toString();
+    const result = await handlePostConsent({ bodyText, db });
+    assert(result.status === 200 && result.contentType === 'text/html', 'a valid submission must return a 200 HTML confirmation');
+    const insertCall = db.calls.find((c) => c.sql.includes('INSERT INTO sms_consents'));
+    assert(insertCall, 'a valid submission must insert a row into sms_consents');
+    assert(insertCall.params[0] === '+15551234567', 'the stored phone number must be normalized to E.164');
+    assert(insertCall.params[1].includes('VDS Expense Tracker'), 'the stored consent_text must be the actual language the client agreed to');
+  }
+
+  // handlePostConsent: checkbox not checked -> 400, nothing written
+  {
+    const db = createFakeD1();
+    const bodyText = new URLSearchParams({ phone: '(555) 123-4567' }).toString();
+    const result = await handlePostConsent({ bodyText, db });
+    assert(result.status === 400, 'an unchecked consent box must be rejected with 400');
+    assert(!db.calls.some((c) => c.sql.includes('INSERT INTO sms_consents')), 'nothing must be written when consent was not checked');
+    assert(result.body.includes('consent'), 'the re-rendered form must explain why the submission was rejected');
+  }
+
+  // handlePostConsent: invalid phone number -> 400, nothing written
+  {
+    const db = createFakeD1();
+    const bodyText = new URLSearchParams({ phone: 'not-a-phone', consent: 'yes' }).toString();
+    const result = await handlePostConsent({ bodyText, db });
+    assert(result.status === 400, 'an invalid phone number must be rejected with 400');
+    assert(!db.calls.some((c) => c.sql.includes('INSERT INTO sms_consents')), 'nothing must be written when the phone number is invalid');
   }
 
   console.log('PASS: handlers.test.js');

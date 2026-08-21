@@ -1,5 +1,6 @@
 // expense-intake/src/expense-flow.js
 import { parseExpense, generateSmsCopy, matchHouseFromReply } from './providers/index.js';
+import { buildContactCardIntroSms } from './providers/shared.js';
 import {
   findClientByTwilioNumber, findAuthorizedSender, findHousesForClient,
   insertExpense, insertPendingReview, findPendingReviewById, deletePendingReview,
@@ -279,7 +280,9 @@ async function maybeSendContactCard({ client, sender, fields, env, deps }) {
     return;
   }
   try {
-    const body = await safeGenerateSmsCopy('contact_card_intro', { business: client.business_name }, env, deps);
+    // Deterministic, not AI-generated — see buildContactCardIntroSms's comment in
+    // providers/shared.js for why this one message can't go through safeGenerateSmsCopy.
+    const body = buildContactCardIntroSms({ business: client.business_name });
     const mediaUrl = `${env.WORKER_BASE_URL}/contact-card/${client.id}`;
     await sendSms({
       accountSid: env.TWILIO_ACCOUNT_SID,

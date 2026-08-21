@@ -77,3 +77,15 @@ export async function findClientById(db, id) {
 export async function markContactCardSent(db, senderId, sentAtIso) {
   return db.prepare('UPDATE authorized_senders SET contact_card_sent_at = ? WHERE id = ?').bind(sentAtIso, senderId).run();
 }
+
+export async function insertSmsConsent(db, { phoneNumber, consentText, consentedAt }) {
+  const result = await db
+    .prepare('INSERT INTO sms_consents (phone_number, consent_text, consented_at) VALUES (?, ?, ?)')
+    .bind(phoneNumber, consentText, consentedAt)
+    .run();
+  return result.meta.last_row_id;
+}
+
+export async function findSmsConsentByPhone(db, phoneNumber) {
+  return db.prepare('SELECT * FROM sms_consents WHERE phone_number = ?').bind(phoneNumber).first();
+}

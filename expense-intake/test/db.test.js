@@ -15,6 +15,8 @@ import {
   findAuthorizedSendersForClient,
   findClientById,
   markContactCardSent,
+  insertSmsConsent,
+  findSmsConsentByPhone,
 } from '../src/db.js';
 import { createFakeD1 } from './fake-d1.js';
 
@@ -198,6 +200,30 @@ async function main() {
     JSON.stringify(db22.calls[0].params) === JSON.stringify(['2026-08-18T12:00:00.000Z', 5]),
     'markContactCardSent must bind the timestamp then the sender id, matching the SET ... WHERE id = ? clause order'
   );
+
+  // insertSmsConsent
+  const db23 = createFakeD1();
+  const newConsentId = await insertSmsConsent(db23, {
+    phoneNumber: '+15551234567', consentText: 'I agree to receive SMS text messages...', consentedAt: '2026-08-20T12:00:00.000Z',
+  });
+  assert(db23.calls[0].sql.includes('INSERT INTO sms_consents'), 'insertSmsConsent must INSERT into the sms_consents table');
+  assert(
+    JSON.stringify(db23.calls[0].params) === JSON.stringify(['+15551234567', 'I agree to receive SMS text messages...', '2026-08-20T12:00:00.000Z']),
+    'insertSmsConsent must bind phone_number, consent_text, consented_at in exact column order'
+  );
+  assert(newConsentId === 1, "insertSmsConsent must return the new row's id from result.meta.last_row_id");
+
+  // findSmsConsentByPhone
+  const consentRow = { id: 1, phone_number: '+15551234567', consent_text: 'I agree...', consented_at: '2026-08-20T12:00:00.000Z' };
+  const db24 = createFakeD1({ 'SELECT * FROM sms_consents WHERE phone_number = ?': consentRow });
+  const foundConsent = await findSmsConsentByPhone(db24, '+15551234567');
+  assert(foundConsent === consentRow, 'findSmsConsentByPhone must return the row from the fake DB');
+  assert(db24.calls[0].params[0] === '+15551234567', 'must bind the phone number as the query parameter');
+
+  // findSmsConsentByPhone: not found
+  const db25 = createFakeD1({ 'SELECT * FROM sms_consents WHERE phone_number = ?': null });
+  const missingConsent = await findSmsConsentByPhone(db25, '+19999999999');
+  assert(missingConsent === null, 'findSmsConsentByPhone must return null when no consent record matches');
 
   console.log('PASS: db.test.js');
 }

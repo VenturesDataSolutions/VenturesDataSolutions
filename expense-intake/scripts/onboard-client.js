@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { validateConfig, onboardClient } from '../src/onboarding.js';
+import { validateConfig, onboardClient, buildConsentCheckSql, parseConsentedPhonesFromWranglerJson } from '../src/onboarding.js';
 
 const D1_DATABASE_NAME = 'expense-intake-db';
 const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -25,6 +25,27 @@ function runWranglerWithSql(sql, { local }) {
   }
 }
 
+// Same temp-file approach as runWranglerWithSql above (and for the same reason: unescaped
+// shell:true args on Windows), but captures stdout instead of inheriting it, since this is a
+// read whose JSON result the caller needs back.
+function queryWranglerWithSql(sql, { local }) {
+  const tmpFile = path.join(os.tmpdir(), `onboard-client-query-${Date.now()}.sql`);
+  fs.writeFileSync(tmpFile, sql, 'utf8');
+  try {
+    const args = ['wrangler', 'd1', 'execute', D1_DATABASE_NAME, local ? '--local' : '--remote', `--file="${tmpFile}"`, '--json'];
+    return execFileSync('npx', args, { cwd: PROJECT_ROOT, shell: true, encoding: 'utf8' });
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
+}
+
+async function queryConsentedPhones(phoneNumbers, { local }) {
+  if (phoneNumbers.length === 0) return [];
+  const sql = buildConsentCheckSql(phoneNumbers);
+  const output = queryWranglerWithSql(sql, { local });
+  return parseConsentedPhonesFromWranglerJson(output);
+}
+
 async function main() {
   const [configPath, serviceAccountPath, ...rest] = process.argv.slice(2);
   const local = rest.includes('--local');
@@ -41,6 +62,7 @@ async function main() {
   const { housesWithSheets } = await onboardClient(config, {
     serviceAccountJson,
     runWrangler: (sql) => runWranglerWithSql(sql, { local }),
+    queryConsentedPhones: (phoneNumbers) => queryConsentedPhones(phoneNumbers, { local }),
   });
 
   console.log(`\nOnboarded ${config.businessName}:`);

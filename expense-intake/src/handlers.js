@@ -4,8 +4,9 @@ import { generateReceiptKey, storeReceiptPhoto } from './receipt-storage.js';
 import { processExpenseMessage } from './expense-flow.js';
 import { buildTwiml } from './twiml.js';
 import { getCachedReply, cacheReply } from './message-dedup.js';
-import { findClientById } from './db.js';
+import { findClientById, insertSmsConsent } from './db.js';
 import { buildVCard } from './vcard.js';
+import { SMS_CONSENT_TEXT, normalizePhoneNumber, isValidNormalizedPhone, buildConsentFormHtml, buildConsentConfirmationHtml } from './consent.js';
 
 export async function handleSmsWebhook({ url, bodyText, signature, env, deps = {} }) {
   const params = parseFormBody(bodyText);
@@ -91,4 +92,31 @@ export async function handleGetContactCard({ clientId, db }) {
   }
   const vcard = buildVCard({ businessName: client.business_name, phoneNumber: client.twilio_number });
   return { status: 200, contentType: 'text/vcard', body: vcard };
+}
+
+// Serves the SMS opt-in form a client fills out themselves before their number can be
+// entered into onboard-client.js — see migrations/0003_add_sms_consents.sql.
+export function handleGetConsentForm() {
+  return { status: 200, contentType: 'text/html', body: buildConsentFormHtml() };
+}
+
+export async function handlePostConsent({ bodyText, db }) {
+  const params = parseFormBody(bodyText);
+  const normalizedPhone = normalizePhoneNumber(params.phone || '');
+  const checked = params.consent === 'yes';
+
+  if (!checked || !isValidNormalizedPhone(normalizedPhone)) {
+    const error = !isValidNormalizedPhone(normalizedPhone)
+      ? 'Please enter a valid phone number.'
+      : 'You must check the box to consent before submitting.';
+    return { status: 400, contentType: 'text/html', body: buildConsentFormHtml({ error }) };
+  }
+
+  await insertSmsConsent(db, {
+    phoneNumber: normalizedPhone,
+    consentText: SMS_CONSENT_TEXT,
+    consentedAt: new Date().toISOString(),
+  });
+
+  return { status: 200, contentType: 'text/html', body: buildConsentConfirmationHtml() };
 }

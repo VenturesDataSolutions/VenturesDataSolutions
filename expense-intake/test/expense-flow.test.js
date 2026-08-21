@@ -82,7 +82,7 @@ function openRouterRouter({ parse, match, copy }) {
 }
 
 async function main() {
-  const client = { id: 1, twilio_number: '+15559876543' };
+  const client = { id: 1, twilio_number: '+15559876543', business_name: 'Acme Rentals' };
   // contact_card_sent_at is set (already onboarded) so scenarios 1-25 below, all written
   // before Step 8 existed, don't unexpectedly trigger a vCard send — that new behavior gets
   // its own dedicated scenarios (26-28) with a fresh, not-yet-onboarded sender.
@@ -840,6 +840,14 @@ async function main() {
     const twilioBody = new URLSearchParams(twilioCall.init.body);
     assert(twilioBody.get('MediaUrl') === 'https://expense-intake.example.workers.dev/contact-card/1', "the vCard MMS must point MediaUrl at this client's /contact-card route");
     assert(twilioBody.get('To') === '+15551234567', 'the vCard MMS must go to the sender who just texted in');
+    // Compliance-critical: this message must carry the fixed, non-AI-generated disclosure
+    // text (buildContactCardIntroSms), not whatever the AI copy-generation mock returned.
+    const vcardSmsBody = twilioBody.get('Body');
+    assert(vcardSmsBody.includes('VDS Expense Tracker'), 'the vCard MMS body must include the brand name');
+    assert(vcardSmsBody.includes('Acme Rentals'), "the vCard MMS body must include the client's actual business name");
+    assert(/frequency/i.test(vcardSmsBody), 'the vCard MMS body must disclose message frequency varies');
+    assert(/data rates/i.test(vcardSmsBody), 'the vCard MMS body must disclose msg & data rates may apply');
+    assert(/HELP/.test(vcardSmsBody) && /STOP/.test(vcardSmsBody), 'the vCard MMS body must include HELP/STOP instructions');
     const markSentCall = db.calls.find((c) => c.sql.includes('UPDATE authorized_senders SET contact_card_sent_at'));
     assert(markSentCall && markSentCall.params[1] === 9, 'contact_card_sent_at must be marked for this sender once the vCard send succeeds');
   }

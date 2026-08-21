@@ -1,6 +1,9 @@
 // expense-intake/test/onboarding.test.js
 import crypto from 'node:crypto';
-import { validateConfig, buildOnboardingSql, prepareHouseSheets, onboardClient } from '../src/onboarding.js';
+import {
+  validateConfig, buildOnboardingSql, prepareHouseSheets, onboardClient,
+  buildConsentCheckSql, parseConsentedPhonesFromWranglerJson, assertConsentForAuthorizedSenders,
+} from '../src/onboarding.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -122,7 +125,8 @@ async function main() {
     assert(headerCall, 'prepareHouseSheets must write the header row into the given googleSheetId');
   }
 
-  // onboardClient ties prepareHouseSheets + buildOnboardingSql + runWrangler together
+  // onboardClient ties prepareHouseSheets + buildOnboardingSql + runWrangler together, and
+  // now checks consent first (see assertConsentForAuthorizedSenders tests below)
   {
     const config = {
       businessName: 'Acme Rentals',
@@ -135,10 +139,85 @@ async function main() {
     const fetchImpl = fakeFetch(googleApiFetchHandlers());
     let ranSql = null;
     const runWrangler = async (sql) => { ranSql = sql; };
-    const result = await onboardClient(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl, runWrangler });
+    const queryConsentedPhones = async () => ['+15551234567'];
+    const result = await onboardClient(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl, runWrangler, queryConsentedPhones });
     assert(result.housesWithSheets[0].googleSheetId === 'sheet_abc', 'onboardClient must return the houses (with their googleSheetId)');
     assert(ranSql && ranSql.includes('sheet_abc'), 'onboardClient must pass SQL referencing the house sheet id to runWrangler');
     assert(ranSql.includes('INSERT INTO clients') && ranSql.includes('INSERT INTO authorized_senders'), 'onboardClient must run the full onboarding SQL, not just the houses portion');
+  }
+
+  // onboardClient: a phone number with no consent record blocks onboarding entirely — no
+  // Sheets calls, no wrangler writes. This is the actual A2P 10DLC consent gate.
+  {
+    const config = {
+      businessName: 'Acme Rentals',
+      twilioNumber: '+15559876543',
+      accountingSoftware: 'quickbooks_online',
+      houses: [{ address: '123 Main St', nickname: 'Main St', googleSheetId: 'sheet_abc' }],
+      authorizedSenders: [{ phoneNumber: '+15551234567', label: 'Owner' }, { phoneNumber: '+15559998888', label: null }],
+    };
+    const fetchImpl = fakeFetch(googleApiFetchHandlers());
+    let ranWrangler = false;
+    const runWrangler = async () => { ranWrangler = true; };
+    // Only one of the two numbers has consented.
+    const queryConsentedPhones = async () => ['+15551234567'];
+    let threw = false;
+    try {
+      await onboardClient(config, { serviceAccountJson: generateTestServiceAccount(), fetchImpl, runWrangler, queryConsentedPhones });
+    } catch (err) {
+      threw = true;
+      assert(err.message.includes('+15559998888'), 'error must name the specific phone number missing consent');
+    }
+    assert(threw, 'onboardClient must throw when any authorized sender has no consent record');
+    assert(fetchImpl.calls.length === 0, 'no Google Sheets/OAuth calls must happen when consent is missing (fail before any side effect)');
+    assert(!ranWrangler, 'runWrangler must never be called when consent is missing');
+  }
+
+  // buildConsentCheckSql
+  {
+    const sql = buildConsentCheckSql(['+15551234567', "+1555'9998888"]);
+    assert(sql.startsWith('SELECT phone_number FROM sms_consents WHERE phone_number IN ('), 'must build a SELECT against sms_consents filtered by phone_number IN (...)');
+    assert(sql.includes("'+15551234567'"), 'must include each phone number as a quoted SQL value');
+    assert(sql.includes("+1555''9998888"), "must escape single quotes in a phone number by doubling them");
+  }
+
+  // parseConsentedPhonesFromWranglerJson: wrangler d1 execute --json output shape
+  {
+    const wranglerOutput = JSON.stringify([
+      { results: [{ phone_number: '+15551234567' }, { phone_number: '+15559998888' }], success: true, meta: {} },
+    ]);
+    const phones = parseConsentedPhonesFromWranglerJson(wranglerOutput);
+    assert(phones.length === 2 && phones.includes('+15551234567') && phones.includes('+15559998888'), 'must extract phone_number from each result row');
+  }
+
+  // parseConsentedPhonesFromWranglerJson: no matching rows -> empty array, not a crash
+  {
+    const wranglerOutput = JSON.stringify([{ results: [], success: true, meta: {} }]);
+    const phones = parseConsentedPhonesFromWranglerJson(wranglerOutput);
+    assert(Array.isArray(phones) && phones.length === 0, 'must return an empty array when no phone numbers have consented');
+  }
+
+  // parseConsentedPhonesFromWranglerJson: malformed JSON throws a clear error rather than crashing opaquely
+  {
+    let threwParseError = false;
+    try { parseConsentedPhonesFromWranglerJson('not json'); } catch (err) {
+      threwParseError = true;
+      assert(err.message.includes('Failed to parse'), 'must throw a descriptive error for malformed wrangler output');
+    }
+    assert(threwParseError, 'malformed wrangler JSON output must throw');
+  }
+
+  // assertConsentForAuthorizedSenders: normalizes phone numbers before comparing, so a
+  // differently-formatted number in config.json still matches a consent record
+  {
+    const config = { authorizedSenders: [{ phoneNumber: '(555) 123-4567', label: null }] };
+    const queryConsentedPhones = async (phones) => {
+      assert(phones[0] === '+15551234567', 'queryConsentedPhones must receive the normalized phone number, not the raw config value');
+      return ['+15551234567'];
+    };
+    let threwNormalized = false;
+    try { await assertConsentForAuthorizedSenders(config, { queryConsentedPhones }); } catch { threwNormalized = true; }
+    assert(!threwNormalized, 'a differently-formatted but equivalent phone number must still match its consent record');
   }
 
   console.log('PASS: onboarding.test.js');

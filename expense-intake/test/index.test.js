@@ -82,6 +82,36 @@ async function main() {
   response = await workerModule.fetch(request, baseEnv({ DB: createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null }) }));
   assert(response.status === 404, 'an unknown client id must 404 through the real route');
 
+  // GET /consent through the real routing layer
+  request = new Request('https://expense-intake.example.com/consent', { method: 'GET' });
+  response = await workerModule.fetch(request, baseEnv());
+  assert(response.status === 200 && response.headers.get('Content-Type') === 'text/html', 'GET /consent must serve the consent form through the real route');
+  const consentFormBody = await response.text();
+  assert(consentFormBody.includes('VDS Expense Tracker') && consentFormBody.includes('type="checkbox"'), 'the served consent form must include the brand name and the consent checkbox');
+
+  // POST /consent, valid submission, through the real routing layer
+  const consentDb = createFakeD1();
+  request = new Request('https://expense-intake.example.com/consent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ phone: '(555) 123-4567', consent: 'yes' }).toString(),
+  });
+  response = await workerModule.fetch(request, baseEnv({ DB: consentDb }));
+  assert(response.status === 200, 'a valid consent submission must return 200 through the real route');
+  const insertCall = consentDb.calls.find((c) => c.sql.includes('INSERT INTO sms_consents'));
+  assert(insertCall && insertCall.params[0] === '+15551234567', 'the submitted phone number must be normalized and written to sms_consents through the real route');
+
+  // POST /consent, checkbox not checked -> 400, nothing written
+  const rejectedDb = createFakeD1();
+  request = new Request('https://expense-intake.example.com/consent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ phone: '(555) 123-4567' }).toString(),
+  });
+  response = await workerModule.fetch(request, baseEnv({ DB: rejectedDb }));
+  assert(response.status === 400, 'an unchecked consent box must be rejected with 400 through the real route');
+  assert(!rejectedDb.calls.some((c) => c.sql.includes('INSERT INTO sms_consents')), 'nothing must be written to sms_consents when consent was not checked');
+
   // scheduled(): the daily purge cron deletes expired pending_review rows through the real handler
   const purgeDb = createFakeD1({ 'DELETE FROM pending_review WHERE expires_at < ?': { success: true, meta: { changes: 2 } } });
   await workerModule.scheduled({ cron: '0 3 * * *' }, baseEnv({ DB: purgeDb }), {});

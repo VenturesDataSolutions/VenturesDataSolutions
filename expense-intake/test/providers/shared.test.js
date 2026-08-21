@@ -3,6 +3,7 @@ import {
   PARSE_EXPENSE_SYSTEM_PROMPT,
   SMS_COPY_ANCHORS,
   buildSmsCopyPrompt,
+  buildContactCardIntroSms,
   extractJsonBlock,
   normalizeParseExpenseResult,
   ProviderParseError,
@@ -40,7 +41,7 @@ async function main() {
   assert(SMS_COPY_ANCHORS.correction_confirmed.length === 2, 'correction_confirmed must have 2 tone anchors');
   assert(SMS_COPY_ANCHORS.pending_item_prompt.length === 2, 'pending_item_prompt must have 2 tone anchors');
   assert(SMS_COPY_ANCHORS.pending_empty.length === 2, 'pending_empty must have 2 tone anchors');
-  assert(SMS_COPY_ANCHORS.contact_card_intro.length === 2, 'contact_card_intro must have 2 tone anchors');
+  assert(!('contact_card_intro' in SMS_COPY_ANCHORS), 'contact_card_intro must NOT be an AI-paraphrased anchor type — it carries required compliance disclosures that must never be reworded (see buildContactCardIntroSms)');
 
   // buildSmsCopyPrompt: injects vars and anchors, rejects unknown types
   const { system, user } = buildSmsCopyPrompt('confirmation', { amount: '42.50', category: 'Materials', house: '123 Main St' });
@@ -157,9 +158,19 @@ async function main() {
   const pendingEmptyPrompt = buildSmsCopyPrompt('pending_empty', {});
   assert(pendingEmptyPrompt.system.includes('caught up') || pendingEmptyPrompt.system.includes('clear'), 'pending_empty prompt must include its tone anchors');
 
-  // buildSmsCopyPrompt must work for the new Step 8 type too
-  const contactCardPrompt = buildSmsCopyPrompt('contact_card_intro', { business: 'Acme Rentals' });
-  assert(contactCardPrompt.user.includes('business: Acme Rentals'), 'contact_card_intro prompt must carry the actual business name');
+  // buildSmsCopyPrompt must reject contact_card_intro now that it's not an AI-generated type
+  let threwContactCardType = false;
+  try { buildSmsCopyPrompt('contact_card_intro', { business: 'Acme Rentals' }); } catch { threwContactCardType = true; }
+  assert(threwContactCardType, 'buildSmsCopyPrompt must reject contact_card_intro — it is a fixed template now, not an AI copy-generation type');
+
+  // buildContactCardIntroSms: a fixed, deterministic template carrying all four required
+  // A2P 10DLC disclosure elements plus the actual business name — never AI-paraphrased
+  const contactCardSms = buildContactCardIntroSms({ business: 'Acme Rentals' });
+  assert(contactCardSms.includes('VDS Expense Tracker'), 'contact card SMS must include the brand name');
+  assert(contactCardSms.includes('Acme Rentals'), 'contact card SMS must include the actual business name');
+  assert(/frequency/i.test(contactCardSms), 'contact card SMS must disclose message frequency varies');
+  assert(/data rates/i.test(contactCardSms), 'contact card SMS must disclose msg & data rates may apply');
+  assert(/HELP/.test(contactCardSms) && /STOP/.test(contactCardSms), 'contact card SMS must include HELP/STOP instructions');
 
   console.log('PASS: providers/shared.test.js');
 }

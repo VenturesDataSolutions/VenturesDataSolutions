@@ -1,4 +1,4 @@
-import { handleSmsWebhook, handleGetReceipt, handleGetContactCard } from './handlers.js';
+import { handleSmsWebhook, handleGetReceipt, handleGetContactCard, handleGetConsentForm, handlePostConsent } from './handlers.js';
 import { purgeExpiredPendingReviews, sendMonthlyNudges } from './scheduled.js';
 
 const DAILY_PURGE_CRON = '0 3 * * *';
@@ -35,6 +35,23 @@ export default {
     if (request.method === 'GET' && url.pathname.startsWith('/contact-card/')) {
       const clientId = url.pathname.slice('/contact-card/'.length);
       const result = await handleGetContactCard({ clientId, db: env.DB });
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/consent') {
+      const result = handleGetConsentForm();
+      return new Response(result.body, {
+        status: result.status,
+        headers: { 'Content-Type': result.contentType },
+      });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/consent') {
+      const bodyText = await request.text();
+      const result = await handlePostConsent({ bodyText, db: env.DB });
       return new Response(result.body, {
         status: result.status,
         headers: { 'Content-Type': result.contentType },
