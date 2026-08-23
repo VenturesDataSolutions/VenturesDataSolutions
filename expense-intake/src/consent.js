@@ -37,6 +37,8 @@ const PAGE_STYLE = `
   input[type="tel"] { width: 100%; padding: 8px; font-size: 16px; margin-top: 4px; box-sizing: border-box; }
   .consent-row { display: flex; align-items: flex-start; gap: 8px; margin-top: 20px; font-weight: normal; }
   .consent-row input { margin-top: 4px; }
+  .consent-links { margin-top: 8px; margin-left: 24px; font-weight: normal; font-size: 13px; color: #555; }
+  .consent-links a { color: #555; }
   button { margin-top: 24px; padding: 10px 20px; font-size: 16px; }
   .error { color: #b00020; margin-top: 12px; }
 `;
@@ -61,6 +63,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ''}
     <input type="checkbox" name="consent" value="yes" required>
     <span>${escapeHtml(SMS_CONSENT_TEXT)}</span>
   </label>
+  <p class="consent-links">By checking this box you agree to our <a href="https://venturesdatasolutions.com/privacy.html" target="_blank" rel="noopener">Privacy Policy</a> and <a href="https://venturesdatasolutions.com/terms.html" target="_blank" rel="noopener">Terms of Service</a>.</p>
   <button type="submit">Submit</button>
 </form>
 </body>
