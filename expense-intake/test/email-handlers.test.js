@@ -82,6 +82,35 @@ function buildRawMime({ from, to, subject, messageId, textBody, attachmentBase64
   return parts.join('\r\n');
 }
 
+// Same "throws if actually invoked" spy pattern already used in test/handlers.test.js, for
+// forcing storeReceiptPhotoFromBytes to fail so the photo_storage_failed path can be exercised.
+function createThrowingImagesBinding() {
+  return {
+    input() { throw new Error('IMAGES unavailable'); },
+  };
+}
+
+// Wraps a normal fake D1 but makes the houses lookup throw — used to force
+// processResolvedExpenseMessage to fail (simulating a Sheets/DB blip) AFTER the sender and
+// client have already resolved successfully, so the processing_failed path can be exercised
+// without also tripping the unrecognized-sender/client-not-found paths.
+function createDbThrowingOnHouses(responses) {
+  const base = createFakeD1(responses);
+  return {
+    calls: base.calls,
+    prepare(sql) {
+      if (sql.startsWith('SELECT * FROM houses')) {
+        return {
+          bind() { return this; },
+          async all() { throw new Error('DB unavailable'); },
+          async first() { throw new Error('DB unavailable'); },
+        };
+      }
+      return base.prepare(sql);
+    },
+  };
+}
+
 function baseEnv(db, overrides = {}) {
   return {
     DB: db,
@@ -141,6 +170,7 @@ async function main() {
     assert(!db.calls.some((c) => c.sql.includes('sms_consents')), 'the flow must never query sms_consents for an email-only sender — proves it is independent of any SMS opt-in state');
     assert(emailSender.calls.length === 1 && emailSender.calls[0].to === 'owner@acme.com', 'a confirmation reply must be sent back to the sender');
     assert(emailSender.calls[0].headers && emailSender.calls[0].headers['In-Reply-To'] === '<msg1@acme.com>', 'the reply must thread via In-Reply-To when the inbound message has a Message-ID');
+    assert(emailSender.calls[0].headers['Auto-Submitted'] === 'auto-replied', "every outbound reply must be marked Auto-Submitted: auto-replied so it can't itself trigger a reply-loop with an autoresponder");
   }
 
   // 2. Unrecognized sender -> rejected, no D1 writes, no reply sent
@@ -238,6 +268,77 @@ async function main() {
     assert(message._rejections.length === 1, 'setReject must be called for a MIME parse failure');
     assert(db.calls.length === 0, 'no DB access at all must happen when the email cannot even be parsed');
     assert(emailSender.calls.length === 0, 'no reply must be sent when the email cannot be parsed');
+  }
+
+  // 5. A transient photo-storage failure (R2/Images hiccup) must reject with feedback to the
+  // sender, not silently drop the email. Per Cloudflare's Email Routing docs, a handler that
+  // returns without consuming/forwarding/rejecting causes the email to vanish with zero
+  // feedback — worse than the SMS path, which at least 500s so Twilio retries.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM authorized_senders WHERE email = ?': { id: 9, client_id: 1, phone_number: null, email: 'owner2@acme.com' },
+      'SELECT * FROM clients WHERE id = ?': client,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const emailSender = createFakeEmailSender();
+    const env = baseEnv(db, { EMAIL: emailSender, IMAGES: createThrowingImagesBinding() });
+    const raw = buildRawMime({
+      from: 'owner2@acme.com', to: 'receipts@intake.venturesdatasolutions.com',
+      subject: 'Receipt', messageId: '<msg5@acme.com>', textBody: 'Home Depot receipt attached',
+      attachmentBase64: Buffer.from('fake-jpeg-bytes').toString('base64'),
+    });
+    const message = createFakeEmailMessage({ from: 'owner2@acme.com', to: 'receipts@intake.venturesdatasolutions.com', raw });
+    const result = await handleEmailWebhook({ message, env, deps: {} });
+
+    assert(result.status === 'rejected' && result.reason === 'photo_storage_failed', 'a transient photo-storage failure must be reported as a rejection, not silently dropped');
+    assert(message._rejections.length === 1, 'setReject must be called on a photo-storage failure so the sender gets an SMTP-level bounce with feedback');
+    assert(!db.calls.some((c) => c.sql.includes('INSERT INTO expenses')), 'nothing must be filed when photo storage fails');
+    assert(emailSender.calls.length === 0, 'no confirmation reply must be sent when photo storage fails');
+  }
+
+  // 6. A transient processing failure (e.g. a Sheets API blip surfaced by
+  // processResolvedExpenseMessage) must also reject with feedback rather than silently drop.
+  {
+    const db = createDbThrowingOnHouses({
+      'SELECT * FROM authorized_senders WHERE email = ?': { id: 10, client_id: 1, phone_number: null, email: 'owner3@acme.com' },
+      'SELECT * FROM clients WHERE id = ?': client,
+    });
+    const emailSender = createFakeEmailSender();
+    const env = baseEnv(db, { EMAIL: emailSender });
+    const raw = buildRawMime({
+      from: 'owner3@acme.com', to: 'receipts@intake.venturesdatasolutions.com',
+      subject: 'Receipt', messageId: '<msg6@acme.com>', textBody: 'Home Depot $20',
+    });
+    const message = createFakeEmailMessage({ from: 'owner3@acme.com', to: 'receipts@intake.venturesdatasolutions.com', raw });
+    const result = await handleEmailWebhook({ message, env, deps: {} });
+
+    assert(result.status === 'rejected' && result.reason === 'processing_failed', 'a transient processing failure must be reported as a rejection, not silently dropped');
+    assert(message._rejections.length === 1, 'setReject must be called on a processing failure so the sender gets feedback instead of the email vanishing');
+    assert(emailSender.calls.length === 0, 'no confirmation reply must be sent when processing fails');
+  }
+
+  // 7. An auto-generated inbound message (vacation autoresponder, bounce, etc.) carrying an
+  // Auto-Submitted header other than "no" must be silently dropped: not processed, and — since
+  // rejecting would itself bounce back at an autoresponder, the classic mail-loop trigger — not
+  // rejected either.
+  {
+    const db = createFakeD1();
+    const emailSender = createFakeEmailSender();
+    const env = baseEnv(db, { EMAIL: emailSender });
+    const raw = buildRawMime({
+      from: 'owner@acme.com', to: 'receipts@intake.venturesdatasolutions.com',
+      subject: 'Out of office', messageId: '<auto1@acme.com>', textBody: 'I am out of office.',
+    });
+    const message = createFakeEmailMessage({
+      from: 'owner@acme.com', to: 'receipts@intake.venturesdatasolutions.com', raw,
+      headers: { 'Auto-Submitted': 'auto-replied' },
+    });
+    const result = await handleEmailWebhook({ message, env, deps: {} });
+
+    assert(result.status === 'ignored' && result.reason === 'auto_submitted', 'an Auto-Submitted inbound message must be ignored, not processed as a real receipt');
+    assert(db.calls.length === 0, 'an auto-submitted message must never reach sender/client resolution or any DB access');
+    assert(emailSender.calls.length === 0, 'an auto-submitted message must never get a reply — replying would itself risk a mail loop');
+    assert(message._rejections.length === 0, 'an auto-submitted message must not be rejected either — only silently dropped, since bouncing an autoresponder is the classic loop trigger');
   }
 
   console.log('PASS: email-handlers.test.js');

@@ -26,7 +26,7 @@ export function isValidNormalizedPhone(phone) {
   return /^\+\d{10,15}$/.test(phone);
 }
 
-function escapeHtml(str) {
+export function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 }
 

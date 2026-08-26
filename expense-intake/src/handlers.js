@@ -6,7 +6,7 @@ import { buildTwiml } from './twiml.js';
 import { getCachedReply, cacheReply } from './message-dedup.js';
 import { findClientById, findAuthorizedSenderByEmail, insertSmsConsent } from './db.js';
 import { buildVCard } from './vcard.js';
-import { SMS_CONSENT_TEXT, normalizePhoneNumber, isValidNormalizedPhone, buildConsentFormHtml, buildConsentConfirmationHtml } from './consent.js';
+import { SMS_CONSENT_TEXT, normalizePhoneNumber, isValidNormalizedPhone, buildConsentFormHtml, buildConsentConfirmationHtml, escapeHtml } from './consent.js';
 import { parseInboundEmail, extractReceiptAttachment, stripQuotedReplyText, normalizeEmailAddress, UNKNOWN_SENDER_REJECT_REASON } from './email-intake.js';
 
 export async function handleSmsWebhook({ url, bodyText, signature, env, deps = {} }) {
@@ -122,9 +122,8 @@ export async function handlePostConsent({ bodyText, db }) {
   return { status: 200, contentType: 'text/html', body: buildConsentConfirmationHtml() };
 }
 
-function escapeEmailHtml(str) {
-  return String(str).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-}
+const TRANSIENT_ERROR_REJECT_REASON =
+  'We hit a temporary error processing your receipt — please try resending it in a few minutes.';
 
 // Cloudflare Email Routing's email() handler for receipts@<subdomain> — see src/index.js.
 // Unlike Twilio's signature-verified webhook, there's no HMAC to check on inbound email; the
@@ -145,6 +144,16 @@ export async function handleEmailWebhook({ message, env, deps = {} }) {
     return { status: 'rejected', reason: 'parse_failed' };
   }
 
+  // Auto-generated mail (vacation autoresponders, bounces, etc.) must never be processed or
+  // replied to — replying to an autoresponder is exactly how mail-loop storms start. Per
+  // RFC 3834, such messages carry an Auto-Submitted header other than "no". This is neither
+  // processed NOR rejected (rejecting would itself bounce back at the sender, the same loop
+  // risk) — it's simply dropped.
+  const autoSubmitted = message.headers && message.headers.get('auto-submitted');
+  if (autoSubmitted && autoSubmitted.toLowerCase() !== 'no') {
+    return { status: 'ignored', reason: 'auto_submitted' };
+  }
+
   const fromAddress = normalizeEmailAddress(message.from);
 
   const sender = await findAuthorizedSenderByEmail(env.DB, fromAddress);
@@ -154,8 +163,12 @@ export async function handleEmailWebhook({ message, env, deps = {} }) {
   }
   const client = await findClientById(env.DB, sender.client_id);
   if (!client) {
+    // The sender row exists but its client_id doesn't resolve — an orphaned authorized_senders
+    // row (a data-integrity bug), not an unrecognized/spam sender. Same external message either
+    // way, but a distinct reason string so this is distinguishable from unrecognized_sender in
+    // logs/observability.
     message.setReject(UNKNOWN_SENDER_REJECT_REASON);
-    return { status: 'rejected', reason: 'unrecognized_sender' };
+    return { status: 'rejected', reason: 'client_not_found' };
   }
 
   let photoR2Key = null;
@@ -171,7 +184,12 @@ export async function handleEmailWebhook({ message, env, deps = {} }) {
       });
     } catch (err) {
       console.error('Failed to store receipt photo from email', { error: err.message });
-      return { status: 'error', reason: 'photo_storage_failed' };
+      // Per Cloudflare's Email Routing docs, a handler that returns without consuming raw,
+      // forwarding, or rejecting causes the email to be silently dropped — worse than the SMS
+      // path, which at least 500s so Twilio retries. A transient failure here (R2/Images
+      // hiccup) must not make the sender's receipt vanish with zero feedback.
+      message.setReject(TRANSIENT_ERROR_REJECT_REASON);
+      return { status: 'rejected', reason: 'photo_storage_failed' };
     }
   }
 
@@ -187,11 +205,24 @@ export async function handleEmailWebhook({ message, env, deps = {} }) {
     ({ smsBody } = await processResolvedExpenseMessage({ client, fields, photoR2Key, env, deps }));
   } catch (err) {
     console.error('Failed to process email expense message', { error: err.message });
-    return { status: 'error', reason: 'processing_failed' };
+    // Same reasoning as the photo-storage-failure path above: a transient failure (Sheets API
+    // blip, DB hiccup, etc.) must reject with feedback, not silently drop the email.
+    message.setReject(TRANSIENT_ERROR_REJECT_REASON);
+    return { status: 'rejected', reason: 'processing_failed' };
   }
 
+  // Defensive: every current path through processResolvedExpenseMessage returns a non-empty
+  // smsBody, so this branch is not known to be reachable today. Kept as a guard in case a
+  // future change to that shared pipeline (e.g. a new silent-no-op path) reintroduces an empty
+  // reply — the email channel should never send a blank confirmation.
   if (!smsBody) {
     return { status: 'ignored' };
+  }
+
+  const replyHeaders = { 'Auto-Submitted': 'auto-replied' };
+  if (parsed.messageId) {
+    replyHeaders['In-Reply-To'] = parsed.messageId;
+    replyHeaders.References = parsed.messageId;
   }
 
   try {
@@ -200,8 +231,8 @@ export async function handleEmailWebhook({ message, env, deps = {} }) {
       from: env.RECEIPTS_EMAIL_ADDRESS,
       subject: `Re: ${parsed.subject || 'Your receipt'}`,
       text: smsBody,
-      html: `<p>${escapeEmailHtml(smsBody)}</p>`,
-      ...(parsed.messageId ? { headers: { 'In-Reply-To': parsed.messageId, References: parsed.messageId } } : {}),
+      html: `<p>${escapeHtml(smsBody)}</p>`,
+      headers: replyHeaders,
     });
   } catch (err) {
     // A send failure here happens after the expense has already been logged to Sheets/D1 —
