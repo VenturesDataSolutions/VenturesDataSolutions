@@ -49,6 +49,43 @@ implementation plan and Build Order.
   `TWILIO_AUTH_TOKEN` secrets as the inbound webhook. See
   `docs/superpowers/specs/2026-08-18-expense-intake-cron-triggers-design.md`.
 
+## Email handler
+
+`email()` — Cloudflare Email Routing delivers inbound mail sent to
+`receipts@intake.venturesdatasolutions.com` to this Worker (no HTTP route
+involved). The handler parses the raw MIME (via `postal-mime`), resolves the
+sender by matching their From address against `authorized_senders.email`,
+and — if recognized — runs it through the exact same parse/categorize/
+house-matching/Sheet-filing pipeline SMS uses (`processResolvedExpenseMessage`
+in `src/expense-flow.js`), then replies via the `send_email` binding.
+
+An unrecognized sender is rejected outright (`message.setReject(...)`, a real
+SMTP-level rejection) rather than silently dropped — there's no signature
+equivalent to Twilio's `X-Twilio-Signature` for inbound email, so this
+sender-address lookup **is** the trust boundary. A clarification reply (e.g.
+"which property is this for?") is matched back to the original message purely
+by sender address + the same `CONVERSATION_STATE` KV state SMS already uses
+(`awaiting_house:<email>` etc.), not by parsing `In-Reply-To`/`References` —
+more robust against mail clients that don't preserve threading headers on
+reply. Our own replies still set those headers so the thread displays
+correctly in the subscriber's inbox.
+
+An inbound message that looks auto-generated (an `Auto-Submitted` header
+other than `no` — vacation autoresponders, bounces) is silently ignored, not
+processed or replied to, to avoid an auto-reply loop; every real reply this
+handler sends carries `Auto-Submitted: auto-replied` on its own outbound
+headers for the same reason. A transient failure partway through (photo
+storage, Sheets/AI calls) results in an SMTP-level rejection with a
+"try again" message rather than the email silently vanishing — see
+`handleEmailWebhook` in `src/handlers.js` for the exact error paths.
+
+This channel exists specifically so a subscriber can use the product without
+ever opting into SMS — see
+`docs/superpowers/specs/2026-08-25-expense-intake-email-channel-design.md`.
+An authorized sender can have an `email`, a `phone_number`, or both; only a
+sender with a phone number is ever gated behind the `/consent` SMS opt-in
+flow.
+
 ## Status
 
 All 9 Build Order steps are complete: repo scaffolding, D1 schema, the
@@ -97,7 +134,8 @@ step above) and authorized senders:
     { "address": "123 Main St", "nickname": "Main St", "googleSheetId": "1AbC...xyz" }
   ],
   "authorizedSenders": [
-    { "phoneNumber": "+15551234567", "label": "Owner" }
+    { "phoneNumber": "+15551234567", "label": "Owner" },
+    { "email": "owner@acme.com", "label": "Owner (email-only, no SMS)" }
   ]
 }
 ```
@@ -115,6 +153,11 @@ for the full design (note: that spec's original "auto-create and share
 the Sheet" approach turned out not to be possible for a non-Workspace
 service account — the design decisions above reflect what was actually
 built after that was discovered).
+
+Each authorized sender needs a `phoneNumber`, an `email`, or both — an
+email-only sender is never subject to the `/consent` SMS opt-in check
+(`assertConsentForAuthorizedSenders` in `src/onboarding.js` only validates
+consent for senders that actually have a phone number).
 
 After onboarding, point the client's Twilio number's messaging webhook
 at this Worker's `/sms` route (see "Twilio secrets" below) — that step
@@ -202,6 +245,24 @@ under "Always Use HTTPS") will break signature verification, since Twilio
 signs the URL it originally POSTed to, not any redirected version. This is
 a common way signature checks silently fail in production: every inbound
 message 403s with no obvious cause from the Worker side alone.
+
+## Email Routing / Sending setup (one-time, per environment)
+
+```bash
+npx wrangler email routing enable intake.venturesdatasolutions.com
+npx wrangler email sending enable intake.venturesdatasolutions.com
+```
+
+A dedicated subdomain, not the apex `venturesdatasolutions.com` — `hello@`/
+`sales@venturesdatasolutions.com` are live mailboxes today on a separate,
+unconfirmed provider, and a subdomain has its own independent MX records, so
+this is fully additive with zero risk to that existing mail.
+
+Then create a routing rule sending `receipts@intake.venturesdatasolutions.com`
+to this Worker (Dashboard → Email Routing → Routing Rules, or
+`wrangler email routing rules create`) — this is the step that actually
+connects the address to the `email()` handler; the two `enable` commands
+above only turn on Email Routing/Sending for the subdomain.
 
 ## Testing Cron Triggers locally
 
