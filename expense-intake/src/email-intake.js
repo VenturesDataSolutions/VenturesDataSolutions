@@ -22,7 +22,7 @@ export function stripQuotedReplyText(text) {
 }
 
 // Only the first image attachment is treated as the receipt photo — same "first media item
-// only" simplification src/twilio.js's extractWebhookFields already makes for MMS.
+// only" simplification src/handlers.js already makes for MMS (it reads fields.media[0].url).
 export function extractReceiptAttachment(attachments) {
   const image = (attachments || []).find((a) => typeof a.mimeType === 'string' && a.mimeType.startsWith('image/'));
   if (!image) return null;
