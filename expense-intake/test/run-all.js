@@ -2,6 +2,7 @@
 import './schema.test.js';
 import './migration-0002.test.js';
 import './migration-0003.test.js';
+import './migration-0004.test.js';
 import './providers/shared.test.js';
 import './providers/openrouter.test.js';
 import './providers/anthropic.test.js';
