@@ -133,7 +133,9 @@ async function main() {
       key: 'receipts/email/1.jpg',
     });
     assert(resultKey === 'receipts/email/1.jpg', 'storeReceiptPhotoFromBytes must return the key it was given');
-    assert(imagesBinding.calls[0].source === inputBytes, 'must pass the given bytes directly into the Images binding, with no fetch');
+    assert(imagesBinding.calls[0].source instanceof ReadableStream, 'must pass a ReadableStream into the Images binding (confirmed against the real binding: it does not accept a raw Uint8Array/ArrayBuffer directly)');
+    const streamedBytes = new Uint8Array(await new Response(imagesBinding.calls[0].source).arrayBuffer());
+    assert(streamedBytes.length === inputBytes.length && streamedBytes.every((b, i) => b === inputBytes[i]), 'the streamed bytes must round-trip to exactly the given bytes, with no fetch involved');
     assert(imagesBinding.calls[0].transformOptions.width === 1568 && imagesBinding.calls[0].transformOptions.height === 1568, 'must cap both dimensions at 1568px, same as the SMS path');
     assert(imagesBinding.calls[0].outputOptions.format === 'image/jpeg' && imagesBinding.calls[0].outputOptions.quality === 85, 'must re-encode as JPEG at quality 85, same as the SMS path');
     const stored = bucket._store.get('receipts/email/1.jpg');
