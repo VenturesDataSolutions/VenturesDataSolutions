@@ -1,4 +1,4 @@
-import { generateReceiptKey, storeReceiptPhoto } from '../src/receipt-storage.js';
+import { generateReceiptKey, storeReceiptPhoto, storeReceiptPhotoFromBytes } from '../src/receipt-storage.js';
 import { createFakeImagesBinding } from './fake-images.js';
 import { createFakeR2Bucket } from './fake-r2.js';
 
@@ -119,6 +119,44 @@ async function main() {
     assert(/R2 put failed/.test(err.message), 'the R2 put() error must propagate unchanged');
   }
   assert(r2Threw, 'an R2 put() failure must throw rather than silently succeeding (so Twilio retries)');
+
+  // storeReceiptPhotoFromBytes: happy path — no fetch, transforms via Images binding, stores to R2
+  {
+    const inputBytes = new Uint8Array([9, 9, 9]);
+    const jpegBytes2 = new ArrayBuffer(4);
+    const imagesBinding = createFakeImagesBinding(jpegBytes2);
+    const bucket = createFakeR2Bucket();
+    const resultKey = await storeReceiptPhotoFromBytes({
+      bytes: inputBytes,
+      imagesBinding,
+      bucket,
+      key: 'receipts/email/1.jpg',
+    });
+    assert(resultKey === 'receipts/email/1.jpg', 'storeReceiptPhotoFromBytes must return the key it was given');
+    assert(imagesBinding.calls[0].source === inputBytes, 'must pass the given bytes directly into the Images binding, with no fetch');
+    assert(imagesBinding.calls[0].transformOptions.width === 1568 && imagesBinding.calls[0].transformOptions.height === 1568, 'must cap both dimensions at 1568px, same as the SMS path');
+    assert(imagesBinding.calls[0].outputOptions.format === 'image/jpeg' && imagesBinding.calls[0].outputOptions.quality === 85, 'must re-encode as JPEG at quality 85, same as the SMS path');
+    const stored = bucket._store.get('receipts/email/1.jpg');
+    assert(stored.value === jpegBytes2, 'must store the transformed JPEG bytes in R2 under the given key');
+    assert(stored.options.httpMetadata.contentType === 'image/jpeg', 'must set the R2 object content type to image/jpeg');
+  }
+
+  // storeReceiptPhotoFromBytes: Images binding failure must propagate, not be swallowed
+  {
+    const throwingImagesBinding = {
+      input() {
+        return { transform() { return this; }, async output() { throw new Error('Images transform failed: unsupported format'); } };
+      },
+    };
+    let threw = false;
+    try {
+      await storeReceiptPhotoFromBytes({ bytes: new Uint8Array([1]), imagesBinding: throwingImagesBinding, bucket: createFakeR2Bucket(), key: 'receipts/email/2.jpg' });
+    } catch (err) {
+      threw = true;
+      assert(/Images transform failed/.test(err.message), 'the Images binding error must propagate unchanged');
+    }
+    assert(threw, 'an Images binding failure must throw rather than silently storing nothing');
+  }
 
   console.log('PASS: receipt-storage.test.js');
 }
