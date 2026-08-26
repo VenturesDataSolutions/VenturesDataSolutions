@@ -27,6 +27,10 @@ export function validateConfig(config) {
   }
   if (!Array.isArray(config.authorizedSenders) || config.authorizedSenders.length === 0) {
     errors.push('authorizedSenders must be a non-empty array');
+  } else {
+    config.authorizedSenders.forEach((sender, i) => {
+      if (!sender.phoneNumber && !sender.email) errors.push(`authorizedSenders[${i}] must have a phoneNumber, an email, or both`);
+    });
   }
   if (errors.length > 0) {
     throw new Error(`Invalid onboarding config:\n${errors.map((e) => `  - ${e}`).join('\n')}`);
@@ -73,7 +77,7 @@ export function buildOnboardingSql(config, housesWithSheets) {
 
   for (const sender of config.authorizedSenders) {
     statements.push(
-      `INSERT INTO authorized_senders (client_id, phone_number, label) VALUES (${clientIdSubquery}, ${sqlValue(sender.phoneNumber)}, ${sqlValue(sender.label ?? null)});`
+      `INSERT INTO authorized_senders (client_id, phone_number, email, label) VALUES (${clientIdSubquery}, ${sqlValue(sender.phoneNumber ?? null)}, ${sqlValue(sender.email ? sender.email.trim().toLowerCase() : null)}, ${sqlValue(sender.label ?? null)});`
     );
   }
 
@@ -107,7 +111,10 @@ export function parseConsentedPhonesFromWranglerJson(jsonText) {
 // regulator ever asks, and it's the reason the prior A2P 10DLC campaign registration was
 // rejected: there was no consent-capture step anywhere before a number reached this script.
 export async function assertConsentForAuthorizedSenders(config, deps) {
-  const phoneNumbers = config.authorizedSenders.map((sender) => normalizePhoneNumber(sender.phoneNumber));
+  const phoneNumbers = config.authorizedSenders
+    .filter((sender) => sender.phoneNumber)
+    .map((sender) => normalizePhoneNumber(sender.phoneNumber));
+  if (phoneNumbers.length === 0) return;
   const consentedPhones = new Set(await deps.queryConsentedPhones(phoneNumbers));
   const missing = phoneNumbers.filter((phone) => !consentedPhones.has(phone));
   if (missing.length > 0) {
