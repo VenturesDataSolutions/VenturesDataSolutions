@@ -1,4 +1,4 @@
-import { handleSmsWebhook, handleGetReceipt, handleGetContactCard, handleGetConsentForm, handlePostConsent } from './handlers.js';
+import { handleSmsWebhook, handleGetReceipt, handleGetContactCard, handleGetConsentForm, handlePostConsent, handleEmailWebhook } from './handlers.js';
 import { purgeExpiredPendingReviews, sendMonthlyNudges } from './scheduled.js';
 
 const DAILY_PURGE_CRON = '0 3 * * *';
@@ -74,5 +74,9 @@ export default {
       return;
     }
     console.error('Unrecognized cron trigger fired', { cron: event.cron });
+  },
+
+  async email(message, env) {
+    await handleEmailWebhook({ message, env });
   },
 };

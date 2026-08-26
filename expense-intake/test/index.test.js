@@ -4,6 +4,8 @@ import { createFakeImagesBinding } from './fake-images.js';
 import { createFakeR2Bucket } from './fake-r2.js';
 import { createFakeD1 } from './fake-d1.js';
 import { createFakeKV } from './fake-kv.js';
+import { createFakeEmailMessage } from './fake-email-message.js';
+import { createFakeEmailSender } from './fake-email-send.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -135,6 +137,24 @@ async function main() {
     threwUnrecognized = true;
   }
   assert(!threwUnrecognized, 'an unrecognized cron string must be logged, not thrown, so a Worker misconfiguration cannot crash a scheduled invocation');
+
+  // email(): the real Worker export routes an inbound email to handleEmailWebhook — an
+  // unrecognized sender is rejected through the real handler, not just the unit-tested one
+  {
+    const emailDb = createFakeD1({ 'SELECT * FROM authorized_senders WHERE email = ?': null });
+    const emailSender = createFakeEmailSender();
+    const rawMime = [
+      'From: stranger@example.com',
+      'To: receipts@intake.venturesdatasolutions.com',
+      'Subject: Receipt',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'some text',
+    ].join('\r\n');
+    const message = createFakeEmailMessage({ from: 'stranger@example.com', to: 'receipts@intake.venturesdatasolutions.com', raw: rawMime });
+    await workerModule.email(message, baseEnv({ DB: emailDb, EMAIL: emailSender }));
+    assert(message._rejections.length === 1, 'the real email() export must reject an unrecognized sender through the real handler');
+  }
 
   console.log('PASS: index.test.js');
 }
