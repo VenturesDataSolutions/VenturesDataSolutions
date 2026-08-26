@@ -16,6 +16,11 @@ RECEIPTS_EMAIL_ADDRESS = "receipts@intake.venturesdatasolutions.com"
 binding = "RECEIPTS_BUCKET"
 bucket_name = "expense-intake-receipts"
 
+# Deliberately unrestricted (no allowed_sender_addresses/destination restriction): this
+# binding always sends `from` the fixed RECEIPTS_EMAIL_ADDRESS above, and `to` whichever
+# address handleEmailWebhook already validated via findAuthorizedSenderByEmail before ever
+# reaching the send call — the app-level authorized-sender check is the security boundary
+# here, not the binding config, and the valid-recipient set changes as senders are onboarded.
 [[send_email]]
 name = "EMAIL"
 
