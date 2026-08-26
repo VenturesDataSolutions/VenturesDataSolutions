@@ -183,7 +183,13 @@ export async function handleEmailWebhook({ message, env, deps = {} }) {
         key: photoR2Key,
       });
     } catch (err) {
-      console.error('Failed to store receipt photo from email', { error: err.message });
+      console.error('Failed to store receipt photo from email', {
+        error: err.message,
+        stack: err.stack,
+        contentType: attachment.contentType,
+        bytesLength: attachment.bytes && attachment.bytes.length,
+        bytesCtor: attachment.bytes && attachment.bytes.constructor && attachment.bytes.constructor.name,
+      });
       // Per Cloudflare's Email Routing docs, a handler that returns without consuming raw,
       // forwarding, or rejecting causes the email to be silently dropped — worse than the SMS
       // path, which at least 500s so Twilio retries. A transient failure here (R2/Images
