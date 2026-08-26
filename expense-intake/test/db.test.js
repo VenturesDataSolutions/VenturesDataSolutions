@@ -14,6 +14,7 @@ import {
   findActiveClientsWithPendingCounts,
   findAuthorizedSendersForClient,
   findClientById,
+  findAuthorizedSenderByEmail,
   markContactCardSent,
   insertSmsConsent,
   findSmsConsentByPhone,
@@ -60,7 +61,7 @@ async function main() {
   const noHouses = await findHousesForClient(db5, 999);
   assert(Array.isArray(noHouses) && noHouses.length === 0, 'findHousesForClient must return an empty array when the client has no houses');
 
-  // insertExpense: now binds 11 params (adds sheet_row) and returns the new row's id
+  // insertExpense: now binds 12 params (adds logged_by_email) and returns the new row's id
   const db6 = createFakeD1();
   const newExpenseId = await insertExpense(db6, {
     houseId: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials',
@@ -71,11 +72,24 @@ async function main() {
   assert(insertCall.params[0] === 10 && insertCall.params[1] === '2026-08-17' && insertCall.params[4] === 'Materials', 'must bind house_id, date, and category in the expected column order');
   assert(
     JSON.stringify(insertCall.params) === JSON.stringify([
-      10, '2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, 'receipts/x/1.jpg', 'HD $42.50', '+15551234567', '', 5,
+      10, '2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, 'receipts/x/1.jpg', 'HD $42.50', '+15551234567', null, '', 5,
     ]),
-    'insertExpense must bind all 11 params (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, notes, sheet_row) in exact column order'
+    'insertExpense must bind all 12 params (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, logged_by_email, notes, sheet_row) in exact column order'
   );
   assert(newExpenseId === 1, "insertExpense must return the new row's id from result.meta.last_row_id");
+
+  // insertExpense: an email-logged expense binds logged_by_email and leaves logged_by_phone null
+  const db6b = createFakeD1();
+  await insertExpense(db6b, {
+    houseId: 10, date: '2026-08-17', vendor: 'Home Depot', amount: 42.5, category: 'Materials',
+    confidence: 0.9, photoR2Key: null, rawText: 'HD $42.50', loggedByEmail: 'owner@acme.com', notes: '', sheetRow: 6,
+  });
+  assert(
+    JSON.stringify(db6b.calls[0].params) === JSON.stringify([
+      10, '2026-08-17', 'Home Depot', 42.5, 'Materials', 0.9, null, 'HD $42.50', null, 'owner@acme.com', '', 6,
+    ]),
+    'insertExpense must bind logged_by_email and leave logged_by_phone null for an email-logged expense'
+  );
 
   // insertExpense: notes defaults to empty string and sheet_row defaults to null when omitted
   const db7 = createFakeD1();
@@ -83,12 +97,12 @@ async function main() {
     houseId: 10, date: '2026-08-17', vendor: null, amount: null, category: 'Other',
     confidence: 0.2, photoR2Key: null, rawText: '', loggedByPhone: '+15551234567',
   });
-  assert(db7.calls[0].params[9] === '', 'insertExpense must default a missing notes value to an empty string, not undefined');
+  assert(db7.calls[0].params[10] === '', 'insertExpense must default a missing notes value to an empty string, not undefined');
   assert(
     JSON.stringify(db7.calls[0].params) === JSON.stringify([
-      10, '2026-08-17', null, null, 'Other', 0.2, null, '', '+15551234567', '', null,
+      10, '2026-08-17', null, null, 'Other', 0.2, null, '', '+15551234567', null, '', null,
     ]),
-    'insertExpense must bind all 11 params correctly even when vendor/amount/photoR2Key/sheet_row are null and notes is omitted'
+    'insertExpense must bind all 12 params correctly even when vendor/amount/photoR2Key/loggedByEmail/sheet_row are null and notes is omitted'
   );
 
   // insertPendingReview: now returns the new row's id
@@ -191,6 +205,20 @@ async function main() {
   const db21 = createFakeD1({ 'SELECT * FROM clients WHERE id = ?': null });
   const missingClientById = await findClientById(db21, 999);
   assert(missingClientById === null, 'findClientById must return null when no client matches');
+
+  // findAuthorizedSenderByEmail
+  const emailSenderRow = { id: 9, client_id: 1, email: 'owner@acme.com', phone_number: null };
+  const db9b = createFakeD1({
+    'SELECT * FROM authorized_senders WHERE email = ?': emailSenderRow,
+  });
+  const foundByEmail = await findAuthorizedSenderByEmail(db9b, 'owner@acme.com');
+  assert(foundByEmail === emailSenderRow, 'findAuthorizedSenderByEmail must return the row from the fake DB');
+  assert(db9b.calls[0].params[0] === 'owner@acme.com', 'must bind the email as the query parameter');
+
+  // findAuthorizedSenderByEmail: not found
+  const db10b = createFakeD1({ 'SELECT * FROM authorized_senders WHERE email = ?': null });
+  const missingByEmail = await findAuthorizedSenderByEmail(db10b, 'nobody@example.com');
+  assert(missingByEmail === null, 'findAuthorizedSenderByEmail must return null when no sender matches');
 
   // markContactCardSent
   const db22 = createFakeD1();
