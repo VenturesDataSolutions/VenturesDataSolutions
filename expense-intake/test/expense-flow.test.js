@@ -1,6 +1,6 @@
 // expense-intake/test/expense-flow.test.js
 import crypto from 'node:crypto';
-import { processExpenseMessage } from '../src/expense-flow.js';
+import { processExpenseMessage, processResolvedExpenseMessage } from '../src/expense-flow.js';
 import { createFakeD1 } from './fake-d1.js';
 import { createFakeR2Bucket } from './fake-r2.js';
 import { createFakeKV } from './fake-kv.js';
@@ -120,6 +120,35 @@ async function main() {
     assert(sheetsCall, 'a high-confidence match must append a row to the house Sheet');
     const pendingInsert = db.calls.find((c) => c.sql.includes('INSERT INTO pending_review'));
     assert(!pendingInsert, 'a high-confidence match must not also write to pending_review');
+  }
+
+  // 1b. processResolvedExpenseMessage (email channel): high confidence, single house -> files
+  // under logged_by_email, not logged_by_phone, and never touches sms_consents/phone state
+  {
+    const db = createFakeD1({
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const bucket = createFakeR2Bucket();
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterHandler(
+        JSON.stringify({ vendor: 'Home Depot', amount: 42.5, category: 'Materials', confidence: 0.9, raw_text: 'HD $42.50' }),
+        'Logged: $42.50, Materials, Main St.'
+      )],
+    ]);
+    const result = await processResolvedExpenseMessage({
+      client,
+      fields: { from: 'owner@acme.com', to: 'receipts@intake.venturesdatasolutions.com', body: '', channel: 'email' },
+      photoR2Key: null,
+      env: baseEnv(db, bucket),
+      deps: { fetchImpl },
+    });
+    assert(result.smsBody.length > 0, 'an email-channel high-confidence match must produce a confirmation body');
+    const expenseInsert = db.calls.find((c) => c.sql.includes('INSERT INTO expenses'));
+    assert(expenseInsert, 'an email-channel match must insert an expenses row');
+    assert(expenseInsert.params[8] === null, 'logged_by_phone must be null for an email-channel expense');
+    assert(expenseInsert.params[9] === 'owner@acme.com', 'logged_by_email must carry the sender email for an email-channel expense');
   }
 
   // 2. Low confidence: single house, low-confidence parse -> pending_review, not expenses
