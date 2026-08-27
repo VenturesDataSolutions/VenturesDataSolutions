@@ -12,6 +12,7 @@ import './receipt-storage.test.js';
 import './email-intake.test.js';
 import './gmail-client.test.js';
 import './gmail-auth.test.js';
+import './gmail-poll.test.js';
 import './consent.test.js';
 import './db.test.js';
 import './google-auth.test.js';
