@@ -31,11 +31,16 @@ export function extractReceiptAttachment(attachments) {
 
 export async function parseInboundEmail(rawArrayBuffer) {
   const parsed = await PostalMime.parse(rawArrayBuffer);
+  const autoSubmittedHeader = (parsed.headers || []).find(
+    (h) => h.key && h.key.toLowerCase() === 'auto-submitted'
+  );
   return {
     subject: parsed.subject || '',
     text: parsed.text || '',
     messageId: parsed.messageId || null,
     attachments: parsed.attachments || [],
+    from: (parsed.from && parsed.from.address) || '',
+    autoSubmitted: autoSubmittedHeader ? autoSubmittedHeader.value : null,
   };
 }
 

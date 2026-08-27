@@ -81,6 +81,40 @@ async function main() {
     assert(parsed.attachments.length === 0, 'a message with no attachment part must yield an empty attachments array');
   }
 
+  // parseInboundEmail: extracts the sender address from the From header
+  {
+    const raw = buildRawMime({
+      from: 'Owner <owner@acme.com>', to: 'venturesdatasolutions@gmail.com',
+      subject: 'Receipt', messageId: '<from-test@acme.com>', textBody: 'hi',
+    });
+    const parsed = await parseInboundEmail(Buffer.from(raw, 'utf8'));
+    assert(parsed.from === 'owner@acme.com', 'must extract the bare address from a "Display Name <addr>" From header');
+  }
+
+  // parseInboundEmail: extracts the Auto-Submitted header when present
+  {
+    const boundary = 'BOUNDARY123';
+    const raw = [
+      'From: owner@acme.com', 'To: venturesdatasolutions@gmail.com', 'Subject: Out of office',
+      'Auto-Submitted: auto-replied',
+      `Content-Type: multipart/mixed; boundary="${boundary}"`, '',
+      `--${boundary}`, 'Content-Type: text/plain; charset=utf-8', '', 'I am out of office.', '',
+      `--${boundary}--`, '',
+    ].join('\r\n');
+    const parsed = await parseInboundEmail(Buffer.from(raw, 'utf8'));
+    assert(parsed.autoSubmitted === 'auto-replied', 'must extract the Auto-Submitted header value when present');
+  }
+
+  // parseInboundEmail: autoSubmitted is null when the header is absent
+  {
+    const raw = buildRawMime({
+      from: 'owner@acme.com', to: 'venturesdatasolutions@gmail.com',
+      subject: 'Receipt', messageId: '<no-auto@acme.com>', textBody: 'hi',
+    });
+    const parsed = await parseInboundEmail(Buffer.from(raw, 'utf8'));
+    assert(parsed.autoSubmitted === null, 'autoSubmitted must be null when the header is absent, not undefined');
+  }
+
   console.log('PASS: email-intake.test.js');
 }
 
