@@ -4,8 +4,6 @@ import { createFakeImagesBinding } from './fake-images.js';
 import { createFakeR2Bucket } from './fake-r2.js';
 import { createFakeD1 } from './fake-d1.js';
 import { createFakeKV } from './fake-kv.js';
-import { createFakeEmailMessage } from './fake-email-message.js';
-import { createFakeEmailSender } from './fake-email-send.js';
 
 function assert(cond, msg) { if (!cond) throw new Error('ASSERTION FAILED: ' + msg); }
 
@@ -138,22 +136,32 @@ async function main() {
   }
   assert(!threwUnrecognized, 'an unrecognized cron string must be logged, not thrown, so a Worker misconfiguration cannot crash a scheduled invocation');
 
-  // email(): the real Worker export routes an inbound email to handleEmailWebhook — an
-  // unrecognized sender is rejected through the real handler, not just the unit-tested one
+  // scheduled(): the Gmail-poll cron routes to pollGmailInbox through the real handler
   {
-    const emailDb = createFakeD1({ 'SELECT * FROM authorized_senders WHERE email = ?': null });
-    const emailSender = createFakeEmailSender();
-    const rawMime = [
-      'From: stranger@example.com',
-      'To: receipts@intake.venturesdatasolutions.com',
-      'Subject: Receipt',
-      'Content-Type: text/plain; charset=utf-8',
-      '',
-      'some text',
-    ].join('\r\n');
-    const message = createFakeEmailMessage({ from: 'stranger@example.com', to: 'receipts@intake.venturesdatasolutions.com', raw: rawMime });
-    await workerModule.email(message, baseEnv({ DB: emailDb, EMAIL: emailSender }));
-    assert(message._rejections.length === 1, 'the real email() export must reject an unrecognized sender through the real handler');
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url, init });
+      if (url.includes('oauth2.googleapis.com')) {
+        return { ok: true, status: 200, json: async () => ({ access_token: 'ya29.tok', expires_in: 3600 }) };
+      }
+      if (url.includes('gmail.googleapis.com/gmail/v1/users/me/messages?')) {
+        return { ok: true, status: 200, json: async () => ({}) }; // no unread messages
+      }
+      throw new Error(`Unhandled fetch in test: ${url}`);
+    };
+    try {
+      await workerModule.scheduled({ cron: '*/2 * * * *' }, baseEnv({
+        DB: createFakeD1(),
+        GMAIL_CLIENT_ID: 'cid',
+        GMAIL_CLIENT_SECRET: 'csec',
+        GMAIL_REFRESH_TOKEN: 'rtok',
+        RECEIPTS_EMAIL_ADDRESS: 'venturesdatasolutions@gmail.com',
+      }), {});
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert(calls.some((c) => c.url.includes('gmail.googleapis.com/gmail/v1/users/me/messages?')), 'the Gmail-poll cron must route to pollGmailInbox and call messages.list through the real scheduled handler');
   }
 
   console.log('PASS: index.test.js');

@@ -25,7 +25,6 @@ import './message-dedup.test.js';
 import './conversation-state.test.js';
 import './scheduled.test.js';
 import './handlers.test.js';
-import './email-handlers.test.js';
 import './index.test.js';
 
 console.log('ALL EXPENSE-INTAKE WORKER TESTS PASSED');
