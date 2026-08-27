@@ -322,8 +322,8 @@ export async function processExpenseMessage({ fields, photoR2Key, env, deps = {}
 }
 
 // Shared by both channels once a client has been resolved: SMS resolves it via the Twilio "To"
-// number (above); the email handler (src/handlers.js's handleEmailWebhook) resolves it via the
-// sender's email address instead, since a single shared inbox has no per-client "To" signal.
+// number (above); the email channel (src/gmail-poll.js's processGmailMessage) resolves it via
+// the sender's email address instead, since a single shared inbox has no per-client "To" signal.
 // Everything from here on — house lookup, the pending-queue/house-selection/correction-window
 // checks, parsing/categorizing, and filing — is identical for both channels.
 export async function processResolvedExpenseMessage({ client, fields, photoR2Key, env, deps = {} }) {

@@ -152,7 +152,7 @@ export async function processGmailMessage({ messageId, accessToken, env, deps = 
   } catch (err) {
     // A send failure here happens after the expense is already filed and the reply is already
     // cached — never let it propagate and cause a duplicate-filing retry (same reasoning as
-    // the old handleEmailWebhook's send-failure handling).
+    // the SMS path's cacheReply-failure handling in handlers.js).
     console.error('Failed to send Gmail confirmation reply', { messageId, error: err.message });
   }
 
