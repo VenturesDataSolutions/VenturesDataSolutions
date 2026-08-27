@@ -28,8 +28,19 @@ export async function getGmailAccessToken({ clientId, clientSecret, refreshToken
   }
 
   const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
-  const ttl = Math.max(60, expiresIn - EXPIRY_SAFETY_MARGIN_SECONDS);
-  await kv.put(ACCESS_TOKEN_KV_KEY, data.access_token, { expirationTtl: ttl });
+  const ttl = expiresIn - EXPIRY_SAFETY_MARGIN_SECONDS;
+  // Cloudflare KV requires a minimum expirationTtl of 60s. Only cache when the
+  // margined TTL clears that floor — otherwise skip caching rather than risk
+  // handing out the token past its real expiry (see EXPIRY_SAFETY_MARGIN_SECONDS).
+  if (ttl >= 60) {
+    try {
+      await kv.put(ACCESS_TOKEN_KV_KEY, data.access_token, { expirationTtl: ttl });
+    } catch (err) {
+      // Losing token caching for one call is far better than failing the whole
+      // Gmail poll over a KV hiccup — log it and still return the token we already have.
+      console.error('Failed to cache Gmail access token', { error: err.message });
+    }
+  }
 
   return data.access_token;
 }

@@ -44,6 +44,26 @@ async function main() {
     assert(putCall.options.expirationTtl === 3600 - 120, 'the cache TTL must be the token lifetime minus a safety margin, so a near-expiry token is never handed out');
   }
 
+  // missing expires_in: falls back to a 3600s default before applying the safety margin
+  {
+    const kv = createFakeKV();
+    const fetchImpl = fakeFetch(true, 200, { access_token: 'ya29.noexpiry', token_type: 'Bearer' });
+    const token = await getGmailAccessToken({ clientId: 'cid', clientSecret: 'csec', refreshToken: 'rtok', kv, fetchImpl });
+    assert(token === 'ya29.noexpiry', 'must still return the fresh token when expires_in is absent');
+
+    const putCall = kv.calls.find((c) => c.method === 'put');
+    assert(putCall && putCall.options.expirationTtl === 3600 - 120, 'must default to a 3600s lifetime when expires_in is missing');
+  }
+
+  // kv.put failure: a KV write hiccup must not discard an already-successful token exchange
+  {
+    const kv = createFakeKV();
+    kv.put = async () => { throw new Error('KV unavailable'); };
+    const fetchImpl = fakeFetch(true, 200, { access_token: 'ya29.uncached', token_type: 'Bearer', expires_in: 3600 });
+    const token = await getGmailAccessToken({ clientId: 'cid', clientSecret: 'csec', refreshToken: 'rtok', kv, fetchImpl });
+    assert(token === 'ya29.uncached', 'a kv.put failure must not prevent returning the freshly exchanged token');
+  }
+
   // error path: Google rejects the refresh -> throws with the error_description
   {
     const kv = createFakeKV();
