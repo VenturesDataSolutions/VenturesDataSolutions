@@ -1,19 +1,15 @@
 // expense-intake/src/gmail-client.js
+import { encode as base64UrlEncode, decodeToBytes as base64UrlDecodeToBytes } from './base64url.js';
+
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
-function base64UrlEncode(bytes) {
-  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  let binary = '';
-  for (const byte of arr) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function base64UrlDecodeToBytes(str) {
-  const padded = str.replace(/-/g, '+').replace(/_/g, '/').padEnd(str.length + ((4 - (str.length % 4)) % 4), '=');
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+// Header values here can originate from an attacker-controlled inbound email (gmail-poll.js
+// builds reply subjects from the parsed inbound subject). Strip any embedded CR/LF so a
+// crafted subject/header value can't fold in a bogus extra header line (e.g. a smuggled
+// "Bcc:") into the outbound RFC 2822 message. Folding to a space (not throwing) matches this
+// codebase's practice of never letting adversarial email content raise on this path.
+function sanitizeHeaderValue(value) {
+  return String(value).replace(/[\r\n]+/g, ' ');
 }
 
 async function gmailErrorMessage(response) {
@@ -51,9 +47,14 @@ export async function markMessageRead({ accessToken, messageId, fetchImpl }) {
 }
 
 export function buildRawEmail({ to, from, subject, text, headers = {} }) {
-  const headerLines = [`To: ${to}`, `From: ${from}`, `Subject: ${subject}`, 'Content-Type: text/plain; charset="UTF-8"'];
+  const headerLines = [
+    `To: ${sanitizeHeaderValue(to)}`,
+    `From: ${sanitizeHeaderValue(from)}`,
+    `Subject: ${sanitizeHeaderValue(subject)}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+  ];
   for (const [name, value] of Object.entries(headers)) {
-    headerLines.push(`${name}: ${value}`);
+    headerLines.push(`${sanitizeHeaderValue(name)}: ${sanitizeHeaderValue(value)}`);
   }
   const message = `${headerLines.join('\r\n')}\r\n\r\n${text}`;
   return base64UrlEncode(new TextEncoder().encode(message));

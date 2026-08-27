@@ -1,13 +1,8 @@
 // expense-intake/src/google-auth.js
+import { encode as base64UrlEncode } from './base64url.js';
+
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
-
-function base64UrlEncode(bytes) {
-  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  let binary = '';
-  for (const byte of arr) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
 
 function base64UrlEncodeString(str) {
   return base64UrlEncode(new TextEncoder().encode(str));

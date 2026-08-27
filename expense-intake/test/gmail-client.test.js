@@ -42,6 +42,25 @@ async function main() {
     assert(decoded.endsWith('Logged: $42.50, Materials, Main St.'), 'raw message body must be the given text, after the header/body blank-line separator');
   }
 
+  // buildRawEmail: strips embedded CR/LF from interpolated values so an attacker-controlled
+  // subject (e.g. from a forwarded inbound email) can't inject a bogus extra header line
+  {
+    const raw = buildRawEmail({
+      to: 'owner@acme.com', from: 'venturesdatasolutions@gmail.com',
+      subject: 'hijack\r\nBcc: attacker@evil.com',
+      text: 'Logged: $42.50, Materials, Main St.',
+      headers: { 'In-Reply-To': '<msg1@acme.com>\r\nX-Injected: evil' },
+    });
+    const decoded = base64UrlDecode(raw).toString('utf8');
+    const [headerBlock, ...bodyParts] = decoded.split('\r\n\r\n');
+    const headerLines = headerBlock.split('\r\n');
+    assert(headerLines.length === 5, `expected exactly 5 header lines (To/From/Subject/Content-Type/In-Reply-To), got ${headerLines.length}: ${JSON.stringify(headerLines)}`);
+    assert(!headerLines.some((line) => line.startsWith('Bcc:')), 'a CRLF embedded in subject must not inject a new Bcc header line');
+    assert(!headerLines.some((line) => line.startsWith('X-Injected:')), 'a CRLF embedded in a header value must not inject a new X-Injected header line');
+    assert(headerLines.some((line) => line === 'Subject: hijack Bcc: attacker@evil.com'), 'the injected CRLF must be folded into a single Subject line, not split');
+    assert(bodyParts.join('\r\n\r\n').endsWith('Logged: $42.50, Materials, Main St.'), 'body text must be unaffected');
+  }
+
   // listUnreadMessageIds: queries is:unread, returns just the ids
   {
     const fetchImpl = fakeFetch([
