@@ -51,40 +51,45 @@ implementation plan and Build Order.
 
 ## Email handler
 
-`email()` — Cloudflare Email Routing delivers inbound mail sent to
-`receipts@intake.venturesdatasolutions.com` to this Worker (no HTTP route
-involved). The handler parses the raw MIME (via `postal-mime`), resolves the
-sender by matching their From address against `authorized_senders.email`,
-and — if recognized — runs it through the exact same parse/categorize/
-house-matching/Sheet-filing pipeline SMS uses (`processResolvedExpenseMessage`
-in `src/expense-flow.js`), then replies via the `send_email` binding.
+A Cron Trigger (`*/2 * * * *`, `pollGmailInbox` in `src/gmail-poll.js`) polls
+`venturesdatasolutions@gmail.com` via the Gmail API — `users.messages.list?q=is:unread`,
+then `users.messages.get?format=raw` for each — instead of a push-based inbound
+handler (Cloudflare Workers can't run a persistent listener, and Gmail's own push
+notifications still need a renewal cron every <7 days regardless, so polling adds
+no real overhead versus push here). The raw MIME bytes are parsed with the same
+`postal-mime`-based `parseInboundEmail` the old Cloudflare-based handler used, and
+the sender is resolved by matching their From address against
+`authorized_senders.email` — then it's the exact same parse/categorize/
+house-matching/Sheet-filing pipeline SMS uses (`processResolvedExpenseMessage` in
+`src/expense-flow.js`).
 
-An unrecognized sender is rejected outright (`message.setReject(...)`, a real
-SMTP-level rejection) rather than silently dropped — there's no signature
-equivalent to Twilio's `X-Twilio-Signature` for inbound email, so this
-sender-address lookup **is** the trust boundary. A clarification reply (e.g.
-"which property is this for?") is matched back to the original message purely
-by sender address + the same `CONVERSATION_STATE` KV state SMS already uses
-(`awaiting_house:<email>` etc.), not by parsing `In-Reply-To`/`References` —
-more robust against mail clients that don't preserve threading headers on
-reply. Our own replies still set those headers so the thread displays
-correctly in the subscriber's inbox.
+An unrecognized sender gets a reply carrying a fixed explanation and the message
+is marked read — there's no SMTP-level reject available for an already-delivered
+Gmail message the way Cloudflare Email Routing had, so a normal reply is the
+closest equivalent. A clarification reply (e.g. "which property is this for?") is
+matched back to the original message purely by sender address + the same
+`CONVERSATION_STATE` KV state SMS already uses (`awaiting_house:<email>` etc.),
+not by parsing `In-Reply-To`/`References` — more robust against mail clients that
+don't preserve threading headers on reply. Our own replies still set those headers
+so the thread displays correctly in the subscriber's inbox.
 
-An inbound message that looks auto-generated (an `Auto-Submitted` header
-other than `no` — vacation autoresponders, bounces) is silently ignored, not
+An inbound message that looks auto-generated (an `Auto-Submitted` header other
+than `no` — vacation autoresponders, bounces) is marked read and dropped, not
 processed or replied to, to avoid an auto-reply loop; every real reply this
-handler sends carries `Auto-Submitted: auto-replied` on its own outbound
-headers for the same reason. A transient failure partway through (photo
-storage, Sheets/AI calls) results in an SMTP-level rejection with a
-"try again" message rather than the email silently vanishing — see
-`handleEmailWebhook` in `src/handlers.js` for the exact error paths.
+handler sends carries `Auto-Submitted: auto-replied` on its own outbound headers
+for the same reason. A transient failure partway through (photo storage, Sheets/AI
+calls) is left **unread** rather than replied to — the next poll retries it
+automatically, which is the polling model's version of Cloudflare's old
+SMTP-reject-with-retry behavior. See `processGmailMessage` in `src/gmail-poll.js`
+for the exact error paths, and
+`docs/superpowers/specs/2026-08-26-expense-intake-gmail-transport-design.md` for
+why polling was chosen over Gmail push notifications.
 
-This channel exists specifically so a subscriber can use the product without
-ever opting into SMS — see
-`docs/superpowers/specs/2026-08-25-expense-intake-email-channel-design.md`.
-An authorized sender can have an `email`, a `phone_number`, or both; only a
-sender with a phone number is ever gated behind the `/consent` SMS opt-in
-flow.
+This channel exists specifically so a subscriber can use the product without ever
+opting into SMS — see
+`docs/superpowers/specs/2026-08-25-expense-intake-email-channel-design.md`. An
+authorized sender can have an `email`, a `phone_number`, or both; only a sender
+with a phone number is ever gated behind the `/consent` SMS opt-in flow.
 
 ## Status
 
@@ -246,23 +251,35 @@ signs the URL it originally POSTed to, not any redirected version. This is
 a common way signature checks silently fail in production: every inbound
 message 403s with no obvious cause from the Worker side alone.
 
-## Email Routing / Sending setup (one-time, per environment)
+## Gmail API setup (one-time, per environment)
+
+1. Create (or reuse) a Google Cloud project and enable the **Gmail API**
+   (APIs & Services → Library).
+2. Configure the **OAuth consent screen**: External user type, add
+   `venturesdatasolutions@gmail.com` as a test user, and add the scope
+   `https://www.googleapis.com/auth/gmail.modify` (covers list/get/mark-as-read
+   *and* send in one scope).
+3. **Publish the consent screen to "In production."** `gmail.modify` is a
+   Google-classified Restricted scope; while the app sits in "Testing" status,
+   Google hard-expires every refresh token after 7 days, which would silently
+   break the poll cron weekly. You'll see an "unverified app" warning once during
+   the consent flow — click through it, since this is your own app authorizing
+   your own account.
+4. Create OAuth credentials: Application type = **Desktop app** (not Web) — this
+   allows the one-time authorization to happen via a loopback redirect without a
+   public callback URL.
+5. Run the one-time consent flow to exchange an authorization code for a refresh
+   token.
+6. Set the three secrets:
 
 ```bash
-npx wrangler email routing enable intake.venturesdatasolutions.com
-npx wrangler email sending enable intake.venturesdatasolutions.com
+npx wrangler secret put GMAIL_CLIENT_ID
+npx wrangler secret put GMAIL_CLIENT_SECRET
+npx wrangler secret put GMAIL_REFRESH_TOKEN
 ```
 
-A dedicated subdomain, not the apex `venturesdatasolutions.com` — `hello@`/
-`sales@venturesdatasolutions.com` are live mailboxes today on a separate,
-unconfirmed provider, and a subdomain has its own independent MX records, so
-this is fully additive with zero risk to that existing mail.
-
-Then create a routing rule sending `receipts@intake.venturesdatasolutions.com`
-to this Worker (Dashboard → Email Routing → Routing Rules, or
-`wrangler email routing rules create`) — this is the step that actually
-connects the address to the `email()` handler; the two `enable` commands
-above only turn on Email Routing/Sending for the subdomain.
+No DNS or Cloudflare dashboard changes are needed — inbound/outbound mail now
+flows entirely through the Gmail API, not Cloudflare Email Routing/Sending.
 
 ## Testing Cron Triggers locally
 
