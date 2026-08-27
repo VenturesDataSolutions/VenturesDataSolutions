@@ -136,6 +136,34 @@ async function main() {
   }
   assert(!threwUnrecognized, 'an unrecognized cron string must be logged, not thrown, so a Worker misconfiguration cannot crash a scheduled invocation');
 
+  // scheduled(): the Gmail-poll cron routes to pollGmailInbox through the real handler
+  {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url, init });
+      if (url.includes('oauth2.googleapis.com')) {
+        return { ok: true, status: 200, json: async () => ({ access_token: 'ya29.tok', expires_in: 3600 }) };
+      }
+      if (url.includes('gmail.googleapis.com/gmail/v1/users/me/messages?')) {
+        return { ok: true, status: 200, json: async () => ({}) }; // no unread messages
+      }
+      throw new Error(`Unhandled fetch in test: ${url}`);
+    };
+    try {
+      await workerModule.scheduled({ cron: '*/2 * * * *' }, baseEnv({
+        DB: createFakeD1(),
+        GMAIL_CLIENT_ID: 'cid',
+        GMAIL_CLIENT_SECRET: 'csec',
+        GMAIL_REFRESH_TOKEN: 'rtok',
+        RECEIPTS_EMAIL_ADDRESS: 'venturesdatasolutions@gmail.com',
+      }), {});
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert(calls.some((c) => c.url.includes('gmail.googleapis.com/gmail/v1/users/me/messages?')), 'the Gmail-poll cron must route to pollGmailInbox and call messages.list through the real scheduled handler');
+  }
+
   console.log('PASS: index.test.js');
 }
 

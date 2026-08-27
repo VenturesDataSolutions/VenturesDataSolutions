@@ -10,6 +10,7 @@ database_id = "162a1b94-cfbe-4321-81ea-584fb7173a7c"
 [vars]
 AI_PROVIDER = "openrouter"
 WORKER_BASE_URL = "https://expense-intake.venturesdatasolutions.workers.dev"
+RECEIPTS_EMAIL_ADDRESS = "venturesdatasolutions@gmail.com"
 
 [[r2_buckets]]
 binding = "RECEIPTS_BUCKET"
@@ -23,11 +24,13 @@ binding = "CONVERSATION_STATE"
 id = "a0e34af4cb9245d7bf906256e49c5db5"
 
 # CONVERSATION_STATE (above) is also used by Build Order steps 5-6 for house-selection
-# state, the 10-minute correction window, and the pending-review queue cursor — one
-# namespace, multiple key prefixes.
+# state, the 10-minute correction window, and the pending-review queue cursor, and now
+# also caches the Gmail OAuth access token under the fixed key "gmail_access_token" (see
+# src/gmail-auth.js) — one namespace, multiple key prefixes.
 
 [triggers]
 crons = [
-  "0 3 * * *",  # daily purge — DAILY_PURGE_CRON in src/index.js
-  "0 9 1 * *",  # monthly nudge — MONTHLY_NUDGE_CRON in src/index.js
+  "0 3 * * *",   # daily purge — DAILY_PURGE_CRON in src/index.js
+  "0 9 1 * *",   # monthly nudge — MONTHLY_NUDGE_CRON in src/index.js
+  "*/2 * * * *", # Gmail inbound poll — GMAIL_POLL_CRON in src/index.js
 ]

@@ -22,3 +22,21 @@ export async function storeReceiptPhoto({ mediaUrl, accountSid, authToken, image
   await bucket.put(key, jpegBytes, { httpMetadata: { contentType: 'image/jpeg' } });
   return key;
 }
+
+// Sibling to storeReceiptPhoto, for a channel where the bytes are already in hand (an email
+// attachment parsed via postal-mime) instead of needing a fetch from a Twilio media URL. Same
+// resize/recompress/store pipeline either way.
+//
+// Confirmed against the real (non-emulated) Images binding via a live wrangler deploy: `.input()`
+// does NOT accept a raw Uint8Array/ArrayBuffer — it needs a ReadableStream, same as
+// storeReceiptPhoto's mediaResponse.body above. Wrapping the bytes in a Response gives us that
+// stream without an extra dependency.
+export async function storeReceiptPhotoFromBytes({ bytes, imagesBinding, bucket, key }) {
+  const transformed = await imagesBinding
+    .input(new Response(bytes).body)
+    .transform({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'scale-down' })
+    .output({ format: 'image/jpeg', quality: JPEG_QUALITY });
+  const jpegBytes = await transformed.response().arrayBuffer();
+  await bucket.put(key, jpegBytes, { httpMetadata: { contentType: 'image/jpeg' } });
+  return key;
+}

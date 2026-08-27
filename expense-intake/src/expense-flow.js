@@ -120,6 +120,7 @@ async function fileExpense({ house, parsed, fields, photoR2Key, env, deps }) {
     fetchImpl: deps.fetchImpl,
   });
   const sheetRow = extractAppendedRowNumber(appendResponse);
+  const isEmailChannel = fields.channel === 'email';
   const expenseId = await insertExpense(env.DB, {
     houseId: house.id,
     date: todayIso(),
@@ -129,7 +130,8 @@ async function fileExpense({ house, parsed, fields, photoR2Key, env, deps }) {
     confidence: parsed.confidence,
     photoR2Key,
     rawText: parsed.raw_text,
-    loggedByPhone: fields.from,
+    loggedByPhone: isEmailChannel ? null : fields.from,
+    loggedByEmail: isEmailChannel ? fields.from : null,
     notes: '',
     sheetRow,
   });
@@ -316,6 +318,15 @@ export async function processExpenseMessage({ fields, photoR2Key, env, deps = {}
 
   await maybeSendContactCard({ client, sender, fields, env, deps });
 
+  return processResolvedExpenseMessage({ client, fields, photoR2Key, env, deps });
+}
+
+// Shared by both channels once a client has been resolved: SMS resolves it via the Twilio "To"
+// number (above); the email channel (src/gmail-poll.js's processGmailMessage) resolves it via
+// the sender's email address instead, since a single shared inbox has no per-client "To" signal.
+// Everything from here on — house lookup, the pending-queue/house-selection/correction-window
+// checks, parsing/categorizing, and filing — is identical for both channels.
+export async function processResolvedExpenseMessage({ client, fields, photoR2Key, env, deps = {} }) {
   const houses = await findHousesForClient(env.DB, client.id);
 
   // A reply's text is checked against the pending-review queue command/cursor, then any

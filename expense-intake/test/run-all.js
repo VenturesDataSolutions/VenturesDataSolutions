@@ -2,12 +2,17 @@
 import './schema.test.js';
 import './migration-0002.test.js';
 import './migration-0003.test.js';
+import './migration-0004.test.js';
 import './providers/shared.test.js';
 import './providers/openrouter.test.js';
 import './providers/anthropic.test.js';
 import './providers/index.test.js';
 import './twilio.test.js';
 import './receipt-storage.test.js';
+import './email-intake.test.js';
+import './gmail-client.test.js';
+import './gmail-auth.test.js';
+import './gmail-poll.test.js';
 import './consent.test.js';
 import './db.test.js';
 import './google-auth.test.js';

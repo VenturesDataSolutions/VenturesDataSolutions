@@ -13,10 +13,10 @@ export async function findHousesForClient(db, clientId) {
   return result.results;
 }
 
-export async function insertExpense(db, { houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone, notes, sheetRow }) {
+export async function insertExpense(db, { houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone, loggedByEmail, notes, sheetRow }) {
   const result = await db
-    .prepare('INSERT INTO expenses (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, notes, sheet_row) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .bind(houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone, notes || '', sheetRow ?? null)
+    .prepare('INSERT INTO expenses (house_id, date, vendor, amount, category, confidence, photo_r2_key, raw_text, logged_by_phone, logged_by_email, notes, sheet_row) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(houseId, date, vendor, amount, category, confidence, photoR2Key, rawText, loggedByPhone ?? null, loggedByEmail ?? null, notes || '', sheetRow ?? null)
     .run();
   return result.meta.last_row_id;
 }
@@ -72,6 +72,10 @@ export async function findAuthorizedSendersForClient(db, clientId) {
 
 export async function findClientById(db, id) {
   return db.prepare('SELECT * FROM clients WHERE id = ?').bind(id).first();
+}
+
+export async function findAuthorizedSenderByEmail(db, email) {
+  return db.prepare('SELECT * FROM authorized_senders WHERE email = ?').bind(email).first();
 }
 
 export async function markContactCardSent(db, senderId, sentAtIso) {

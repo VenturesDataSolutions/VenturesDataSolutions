@@ -82,6 +82,34 @@ async function main() {
     assert(threwMissingSheetId, 'a house with no googleSheetId must throw');
   }
 
+  // validateConfig: an authorized sender with only an email (no phone) is valid — the actual compliance fix
+  {
+    const config = {
+      businessName: 'Acme Rentals', twilioNumber: '+15559876543', accountingSoftware: 'quickbooks_online',
+      houses: [{ address: '123 Main St', nickname: null, googleSheetId: 'sheet_abc' }],
+      authorizedSenders: [{ email: 'owner@acme.com', label: null }],
+    };
+    let threw = false;
+    try { validateConfig(config); } catch { threw = true; }
+    assert(!threw, 'an authorized sender with only an email (no phone) must be valid');
+  }
+
+  // validateConfig: an authorized sender with neither phone nor email is reported
+  {
+    let threw = false;
+    try {
+      validateConfig({
+        businessName: 'Acme Rentals', twilioNumber: '+15559876543', accountingSoftware: 'quickbooks_online',
+        houses: [{ address: '123 Main St', nickname: null, googleSheetId: 'sheet_abc' }],
+        authorizedSenders: [{ label: 'Nobody' }],
+      });
+    } catch (err) {
+      threw = true;
+      assert(err.message.includes('authorizedSenders[0]'), 'must report which authorized sender is missing both identities');
+    }
+    assert(threw, 'an authorized sender with neither phoneNumber nor email must throw');
+  }
+
   // buildOnboardingSql
   {
     const config = {
@@ -108,6 +136,18 @@ async function main() {
     assert(sql.includes("'sheet_abc'") && sql.includes("'sheet_def'"), "must interpolate each house's googleSheetId");
     assert((sql.match(/INSERT INTO authorized_senders/g) || []).length === 2, 'must include one authorized_senders INSERT per sender');
     assert(sql.includes('NULL'), 'a null nickname/label must be written as SQL NULL, not the string "null"');
+  }
+
+  // buildOnboardingSql: writes an authorized sender's email (lowercased) alongside/instead of a phone number
+  {
+    const config = {
+      businessName: 'Acme Rentals', twilioNumber: '+15559876543', accountingSoftware: 'quickbooks_online',
+      authorizedSenders: [{ email: 'Owner@Acme.com', label: 'Owner' }],
+    };
+    const sql = buildOnboardingSql(config, []);
+    assert(sql.includes("'owner@acme.com'"), 'must lowercase the email before writing it');
+    assert(/INSERT INTO authorized_senders \(client_id, phone_number, email, label\)/.test(sql), 'must include the email column in the authorized_senders INSERT');
+    assert(sql.includes('NULL'), 'a missing phoneNumber must be written as SQL NULL');
   }
 
   // prepareHouseSheets: writes the header row into each house's already-created,
@@ -218,6 +258,17 @@ async function main() {
     let threwNormalized = false;
     try { await assertConsentForAuthorizedSenders(config, { queryConsentedPhones }); } catch { threwNormalized = true; }
     assert(!threwNormalized, 'a differently-formatted but equivalent phone number must still match its consent record');
+  }
+
+  // assertConsentForAuthorizedSenders: an email-only sender never touches the SMS consent gate at all
+  {
+    const config = { authorizedSenders: [{ email: 'owner@acme.com', label: null }] };
+    let queryWasCalled = false;
+    const queryConsentedPhones = async () => { queryWasCalled = true; return []; };
+    let threw = false;
+    try { await assertConsentForAuthorizedSenders(config, { queryConsentedPhones }); } catch { threw = true; }
+    assert(!threw, 'an email-only authorized sender must never be blocked by the SMS consent gate');
+    assert(!queryWasCalled, 'the SMS consent lookup must not even run when no authorized sender has a phone number');
   }
 
   console.log('PASS: onboarding.test.js');

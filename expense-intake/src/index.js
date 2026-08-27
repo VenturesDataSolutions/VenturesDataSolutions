@@ -1,8 +1,10 @@
 import { handleSmsWebhook, handleGetReceipt, handleGetContactCard, handleGetConsentForm, handlePostConsent } from './handlers.js';
 import { purgeExpiredPendingReviews, sendMonthlyNudges } from './scheduled.js';
+import { pollGmailInbox } from './gmail-poll.js';
 
 const DAILY_PURGE_CRON = '0 3 * * *';
 const MONTHLY_NUDGE_CRON = '0 9 1 * *';
+const GMAIL_POLL_CRON = '*/2 * * * *';
 
 export default {
   async fetch(request, env) {
@@ -71,6 +73,10 @@ export default {
     }
     if (event.cron === MONTHLY_NUDGE_CRON) {
       await sendMonthlyNudges(env);
+      return;
+    }
+    if (event.cron === GMAIL_POLL_CRON) {
+      await pollGmailInbox(env);
       return;
     }
     console.error('Unrecognized cron trigger fired', { cron: event.cron });
