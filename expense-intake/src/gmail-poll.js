@@ -82,13 +82,21 @@ export async function processGmailMessage({ messageId, accessToken, env, deps = 
     // normal reply carrying the same rejection text. This is a terminal classification (the
     // sender will never resolve without an onboarding change), so it's marked read rather than
     // retried every 2 minutes.
-    await sendGmailMessage({
-      accessToken, to: fromAddress, from: env.RECEIPTS_EMAIL_ADDRESS,
-      subject: `Re: ${parsed.subject || 'Your receipt'}`,
-      text: UNKNOWN_SENDER_REJECT_REASON,
-      headers: { 'Auto-Submitted': 'auto-replied' },
-      fetchImpl,
-    });
+    try {
+      await sendGmailMessage({
+        accessToken, to: fromAddress, from: env.RECEIPTS_EMAIL_ADDRESS,
+        subject: `Re: ${parsed.subject || 'Your receipt'}`,
+        text: UNKNOWN_SENDER_REJECT_REASON,
+        headers: { 'Auto-Submitted': 'auto-replied' },
+        fetchImpl,
+      });
+    } catch (err) {
+      // A transient send failure here must not leave this message unread — it's already a
+      // terminal classification (the sender will never resolve without an onboarding change),
+      // so retrying it every poll would just repeat the same failed send forever instead of
+      // giving up on a genuinely undeliverable notice.
+      console.error('Failed to send unrecognized-sender rejection', { messageId, error: err.message });
+    }
     await markMessageRead({ accessToken, messageId, fetchImpl });
     return;
   }
@@ -114,7 +122,18 @@ export async function processGmailMessage({ messageId, accessToken, env, deps = 
     return;
   }
 
-  await cacheReply(env.CONVERSATION_STATE, messageId, smsBody);
+  try {
+    await cacheReply(env.CONVERSATION_STATE, messageId, smsBody);
+  } catch (err) {
+    // Losing dedup protection for one message is far better than failing the whole invocation
+    // over a KV hiccup — same reasoning as handleSmsWebhook's identical cacheReply call
+    // (handlers.js). By this point the expense is already committed (Sheets row + D1 row); if
+    // this propagated, pollGmailInbox's outer catch would leave the message unread, and the
+    // next poll would re-run this whole function from scratch — since getCachedReply would
+    // still see nothing cached, it would re-file the same receipt a second time. Log and
+    // continue on to the send/mark-read below instead.
+    console.error('Failed to cache reply for dedup', { messageId, error: err.message });
+  }
 
   const replyHeaders = { 'Auto-Submitted': 'auto-replied' };
   if (parsed.messageId) {

@@ -89,6 +89,23 @@ function createThrowingImagesBinding() {
   };
 }
 
+// A KV whose put() throws specifically for the message-dedup cache key prefix (message-dedup.js's
+// cacheReply), while every other key (awaiting_house/correction/gmail_access_token state) still
+// works normally — isolates the "cacheReply's KV write fails" scenario from every other KV write
+// gmail-poll.js's shared pipeline makes along the way.
+function createKvThrowingOnProcessedPut(initial = {}) {
+  const base = createFakeKV(initial);
+  return {
+    ...base,
+    async put(key, value, options) {
+      if (key.startsWith('processed:')) {
+        throw new Error('KV unavailable');
+      }
+      return base.put(key, value, options);
+    },
+  };
+}
+
 function createDbThrowingOnHouses(responses) {
   const base = createFakeD1(responses);
   return {
@@ -348,6 +365,116 @@ async function main() {
     assert(db.calls.length === 0, 'an already-cached message must not touch the DB at all');
     assert(!fetchImpl.calls.some((c) => c.url.includes('format=raw')), 'an already-cached message must not even be re-fetched');
     assert(fetchImpl.calls.some((c) => c.url.includes('/modify')), 'an already-cached message must still be marked read');
+  }
+
+  // 9. A KV hiccup on cacheReply (after the expense is already filed) must not propagate — the
+  // invocation must still send the confirmation and mark the message read in the same pass, so
+  // the physical Gmail message doesn't stay unread and get reprocessed into a duplicate filing
+  // on the next poll (this is the exact bug handleSmsWebhook's identical cacheReply call
+  // already guards against, per handlers.js:50-56).
+  {
+    const db = createFakeD1({
+      'SELECT * FROM authorized_senders WHERE email = ?': { id: 11, client_id: 1, phone_number: null, email: 'owner4@acme.com' },
+      'SELECT * FROM clients WHERE id = ?': client,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const kv = createKvThrowingOnProcessedPut();
+    const env = baseEnv(db, { CONVERSATION_STATE: kv });
+    const raw = buildRawMime({ from: 'owner4@acme.com', to: 'venturesdatasolutions@gmail.com', subject: 'Receipt', messageId: '<msg7@acme.com>', textBody: 'Home Depot $15' });
+    const fetchImpl = dispatchFetch([
+      getRawHandler(raw),
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.sheets', token_type: 'Bearer', expires_in: 3600 })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterRouter({
+        parse: JSON.stringify({ vendor: 'Home Depot', amount: 15, category: 'Materials', confidence: 0.9, raw_text: 'HD $15' }),
+        copy: 'Logged: $15.00, Materials, Main St.',
+      })],
+      ['/modify', jsonOk({})],
+      ['/messages/send', jsonOk({ id: 'sent7' })],
+    ]);
+
+    let threw = false;
+    try {
+      await processGmailMessage({ messageId: 'm10', accessToken: 'ya29.tok', env, deps: { fetchImpl } });
+    } catch {
+      threw = true;
+    }
+    assert(!threw, 'a cacheReply KV failure must not propagate — the expense is already filed by this point');
+    assert(db.calls.filter((c) => c.sql.includes('INSERT INTO expenses')).length === 1, 'exactly one expense must be filed despite the cache write failing');
+    assert(fetchImpl.calls.some((c) => c.url.includes('/messages/send')), 'the confirmation reply must still be sent even though caching it for dedup failed');
+    assert(fetchImpl.calls.some((c) => c.url.includes('/modify')), 'the message must still be marked read in the same invocation, even though the KV cache write failed — this is what prevents the next poll from re-listing and reprocessing it');
+  }
+
+  // 10. Bonus: prove the fix actually prevents a duplicate refile, not just that the function
+  // doesn't throw. Simulates two consecutive polls against a stateful fake Gmail inbox: the
+  // first poll's cacheReply KV write fails (same as scenario 9) but the message still gets
+  // marked read within that same invocation; the second poll's listUnreadMessageIds — driven by
+  // Gmail's own is:unread state, not by our KV cache — correctly no longer includes it, so
+  // processGmailMessage is never invoked for it a second time and nothing is refiled.
+  {
+    const db = createFakeD1({
+      'SELECT * FROM authorized_senders WHERE email = ?': { id: 12, client_id: 1, phone_number: null, email: 'owner5@acme.com' },
+      'SELECT * FROM clients WHERE id = ?': client,
+      'SELECT * FROM houses WHERE client_id = ?': singleHouse,
+    });
+    const kv = createKvThrowingOnProcessedPut();
+    const env = baseEnv(db, {
+      CONVERSATION_STATE: kv,
+      GMAIL_CLIENT_ID: 'cid', GMAIL_CLIENT_SECRET: 'csec', GMAIL_REFRESH_TOKEN: 'rtok',
+    });
+    const raw = buildRawMime({ from: 'owner5@acme.com', to: 'venturesdatasolutions@gmail.com', subject: 'Receipt', messageId: '<msg8@acme.com>', textBody: 'Lowes $20' });
+
+    let unread = ['m11'];
+    const fetchImpl = dispatchFetch([
+      ['oauth2.googleapis.com', jsonOk({ access_token: 'ya29.tok', token_type: 'Bearer', expires_in: 3600 })],
+      ['gmail.googleapis.com/gmail/v1/users/me/messages?', async () => ({ ok: true, status: 200, json: async () => ({ messages: unread.map((id) => ({ id })) }) })],
+      ['messages/m11?format=raw', jsonOk({ raw: base64UrlEncode(Buffer.from(raw, 'utf8')) })],
+      ['sheets.googleapis.com', jsonOk({ spreadsheetId: 'sheet_abc', updates: { updatedRange: 'Sheet1!A2:I2' } })],
+      ['openrouter.ai', openRouterRouter({
+        parse: JSON.stringify({ vendor: 'Lowes', amount: 20, category: 'Materials', confidence: 0.9, raw_text: 'Lowes $20' }),
+        copy: 'Logged: $20.00, Materials, Main St.',
+      })],
+      ['/modify', async (url) => {
+        const m = url.match(/\/messages\/([^/]+)\/modify/);
+        if (m) unread = unread.filter((id) => id !== m[1]);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }],
+      ['/messages/send', jsonOk({ id: 'sent8' })],
+    ]);
+
+    const firstPoll = await pollGmailInbox(env, { fetchImpl });
+    assert(firstPoll.processedCount === 1, 'the first poll must process the message despite the KV cache-write failure');
+
+    const secondPoll = await pollGmailInbox(env, { fetchImpl });
+    assert(secondPoll.messageCount === 0, "the second poll's is:unread listing must no longer include the message once it's been marked read, regardless of the KV cache outcome");
+
+    assert(db.calls.filter((c) => c.sql.includes('INSERT INTO expenses')).length === 1, 'the KV cache-write failure must not cause a duplicate filing across polls, since the message was correctly marked read in the first poll');
+  }
+
+  // 11. The unrecognized-sender rejection send is itself a transient-failure-prone network
+  // call — a Gmail API blip sending that notice must not leave the message unread forever,
+  // since this branch is a terminal classification that's never supposed to retry.
+  {
+    const db = createFakeD1({ 'SELECT * FROM authorized_senders WHERE email = ?': null });
+    const env = baseEnv(db);
+    const raw = buildRawMime({
+      from: 'stranger2@example.com', to: 'venturesdatasolutions@gmail.com',
+      subject: 'Receipt', messageId: '<msg9@example.com>', textBody: 'some text',
+    });
+    const fetchImpl = dispatchFetch([
+      getRawHandler(raw),
+      ['/modify', jsonOk({})],
+      ['/messages/send', async () => { throw new Error('Gmail API blip'); }],
+    ]);
+
+    let threw = false;
+    try {
+      await processGmailMessage({ messageId: 'm12', accessToken: 'ya29.tok', env, deps: { fetchImpl } });
+    } catch {
+      threw = true;
+    }
+    assert(!threw, 'a failure sending the unrecognized-sender rejection notice must not propagate');
+    assert(fetchImpl.calls.some((c) => c.url.includes('/modify')), 'the message must still be marked read even though the rejection notice failed to send — this branch is terminal and must never retry');
   }
 
   // pollGmailInbox: processes each listed message, isolating one message's failure from the
