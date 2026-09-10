@@ -8,6 +8,7 @@ const NAV_LINKS = [
   ['faq.html', 'FAQ'],
   ['what-we-do.html', 'What We Do'],
   ['contact.html', 'Contact'],
+  ['https://portal.venturesdatasolutions.com', 'Investor Login'],
 ];
 
 function readPage(filename) {
